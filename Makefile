@@ -1,6 +1,6 @@
-.PHONY: help setup check-go check-brew install-go env deps run build clean \
+.PHONY: help setup check-go check-brew install-go install-swag env deps run build clean \
         docker-up docker-down docker-prod-up docker-prod-down \
-        certs certs-check test
+        certs certs-trust certs-check certs-clean test docs
 
 GOMIN        := 1.22
 GOROOT_BREW  := $(shell brew --prefix go 2>/dev/null)/bin/go
@@ -20,10 +20,11 @@ help:
 
 # ── Setup ────────────────────────────────────────────────────────────────────
 
-## setup: Full setup for new developers (install Go, deps, env file, dev certs)
-setup: check-brew install-go env deps certs
+## setup: Full setup for new developers (install Go, swag, deps, env file, dev certs)
+setup: check-brew install-go install-swag env deps certs docs
 	@echo ""
 	@echo "✅  Setup complete! Run 'make run' to start the HTTPS server."
+	@echo "    Swagger UI will be at https://localhost:8443/swagger/index.html"
 	@echo ""
 
 ## check-brew: Ensure Homebrew is installed
@@ -60,6 +61,12 @@ install-go: check-brew
 	@echo "     Settings → Build, Execution, Deployment → Go → GOROOT"
 	@echo "     Set to: $$(brew --prefix go)"
 
+## install-swag: Install the swag CLI tool for generating Swagger docs
+install-swag: check-go
+	@echo "→ Installing swag CLI..."
+	@which swag > /dev/null 2>&1 && echo "  ✔ swag already installed" || \
+		(go install github.com/swaggo/swag/cmd/swag@latest && echo "  ✔ swag installed")
+
 ## env: Create .env from .env.example if it doesn't exist
 env:
 	@echo "→ Setting up .env file..."
@@ -76,6 +83,15 @@ deps: check-go
 	@echo "→ Downloading dependencies..."
 	@go mod tidy
 	@echo "  ✔ Dependencies ready"
+
+# ── Docs ─────────────────────────────────────────────────────────────────────
+
+## docs: Generate Swagger documentation from code annotations
+docs: install-swag
+	@echo "→ Generating Swagger docs..."
+	@swag init -g cmd/server/main.go -o docs --parseDependency --parseInternal
+	@echo "  ✔ Docs generated in ./docs/"
+	@echo "  ✔ Start the server and visit https://localhost:8443/swagger/index.html"
 
 # ── TLS / Certs ──────────────────────────────────────────────────────────────
 
@@ -118,13 +134,14 @@ certs-clean:
 # ── Dev ──────────────────────────────────────────────────────────────────────
 
 ## run: Run the HTTPS server locally (self-signed cert, dev mode)
-run: check-go env certs
+run: check-go env certs docs
 	@echo "→ Starting $(APP) with HTTPS..."
-	@echo "  ✔ API: https://localhost:8443"
+	@echo "  ✔ API:        https://localhost:8443"
+	@echo "  ✔ Swagger UI: https://localhost:8443/swagger/index.html"
 	@go run $(CMD)
 
 ## build: Build the binary
-build: check-go
+build: check-go docs
 	@echo "→ Building $(APP)..."
 	@go build -ldflags="-s -w" -o bin/$(APP) $(CMD)
 	@echo "  ✔ Binary available at bin/$(APP)"
@@ -134,20 +151,21 @@ test: check-go
 	@echo "→ Running tests..."
 	@go test ./... -v
 
-## clean: Remove build artifacts
+## clean: Remove build artifacts and generated docs
 clean:
 	@echo "→ Cleaning..."
-	@rm -rf bin/
+	@rm -rf bin/ docs/
 	@echo "  ✔ Done"
 
 # ── Docker ───────────────────────────────────────────────────────────────────
 
 ## docker-up: Start dev environment (HTTPS via self-signed cert)
-docker-up: env certs
+docker-up: env certs docs
 	@echo "→ Starting dev Docker services (HTTPS)..."
 	@docker compose -f deployments/docker-compose.yml up --build -d
-	@echo "  ✔ API at https://localhost:8443 (self-signed cert)"
-	@echo "  ✔ Health: curl -k https://localhost:8443/health"
+	@echo "  ✔ API:        https://localhost:8443"
+	@echo "  ✔ Swagger UI: https://localhost:8443/swagger/index.html"
+	@echo "  ✔ Health:     curl -k https://localhost:8443/health"
 
 ## docker-down: Stop dev Docker services
 docker-down:
@@ -161,6 +179,7 @@ docker-prod-up: env
 	@echo "  ⚠️  Make sure you have run 'make letsencrypt' first!"
 	@docker compose -f deployments/docker-compose.prod.yml up --build -d
 	@echo "  ✔ Services running with Let's Encrypt SSL"
+	@echo "  ℹ️  Swagger UI is disabled in production"
 
 ## docker-prod-down: Stop production Docker services
 docker-prod-down:

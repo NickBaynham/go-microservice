@@ -194,3 +194,33 @@ Certbot runs as a sidecar container and **auto-renews** the certificate every 12
 | `production` | Nginx reverse proxy | Let's Encrypt (certbot) |
 
 In production, Nginx terminates SSL on port 443 and proxies plain HTTP to the Go app internally on port 8080 — so your Go code never changes between environments.
+
+## Swagger / API Documentation
+
+Swagger docs are auto-generated from annotations in the handler code using [swaggo/swag](https://github.com/swaggo/swag).
+
+### Generate & view docs
+
+```bash
+make docs   # generates ./docs/ from code annotations
+make run    # start the server
+```
+
+Then open in your browser:
+```
+https://localhost:8443/swagger/index.html
+```
+
+You can authorize with a JWT directly in the UI — click the **Authorize** button and enter `Bearer <your_token>`.
+
+> Swagger UI is automatically **disabled in production** (`ENV=production`).
+
+### Regenerate after changes
+
+Any time you add or modify a handler, regenerate the docs:
+
+```bash
+make docs
+```
+
+Or it runs automatically as part of `make run` and `make build`.

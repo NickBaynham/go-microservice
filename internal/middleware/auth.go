@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/example/go-microservice/internal/auth"
+	"go-microservice/internal/auth"
 	"github.com/gin-gonic/gin"
 )
 

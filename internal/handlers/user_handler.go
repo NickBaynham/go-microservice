@@ -3,10 +3,10 @@ package handlers
 import (
 	"net/http"
 
-	"github.com/example/go-microservice/internal/auth"
-	"github.com/example/go-microservice/internal/config"
-	"github.com/example/go-microservice/internal/models"
-	"github.com/example/go-microservice/internal/repository"
+	"go-microservice/internal/auth"
+	"go-microservice/internal/config"
+	"go-microservice/internal/models"
+	"go-microservice/internal/repository"
 	"github.com/gin-gonic/gin"
 	"go.mongodb.org/mongo-driver/bson"
 	"golang.org/x/crypto/bcrypt"

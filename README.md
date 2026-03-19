@@ -110,3 +110,17 @@ curl http://localhost:8080/health
 | MONGO_DB          | userservice                | Database name          |
 | JWT_SECRET        | change-me-in-production    | JWT signing secret     |
 | JWT_EXPIRE_HOURS  | 24                         | Token expiry in hours  |
+
+## .env
+Your .env should look like this example:
+```
+PORT=8080
+MONGO_URI=mongodb://localhost:27017
+MONGO_DB=userservice
+JWT_SECRET=change-me-in-production-use-a-long-random-string
+JWT_EXPIRE_HOURS=24
+```
+To create a JWT secret do this:
+```
+openssl rand -hex 32
+```

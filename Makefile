@@ -209,10 +209,10 @@ letsencrypt:
 
 # ── Testing ───────────────────────────────────────────────────────────────────
 
-## test-unit: Run unit tests only
+## test-unit: Run unit tests only (no server required)
 test-unit: check-go
 	@echo "→ Running unit tests..."
-	@go test ./internal/... -v -count=1
+	@go test ./internal/... -v -count=1 -race
 	@echo "  ✔ Unit tests passed"
 
 ## test-integration-local: Run integration tests against your local running server

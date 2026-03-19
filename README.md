@@ -224,3 +224,59 @@ make docs
 ```
 
 Or it runs automatically as part of `make run` and `make build`.
+
+## Testing
+
+The test suite covers every endpoint — status codes, response keys/values, auth rules, and error cases. The database is cleaned before and after each run so tests are fully isolated and repeatable.
+
+### Run all tests (pipeline-safe)
+
+```bash
+make test
+```
+
+This runs unit tests, then spins up a dedicated Docker environment (separate DB on port 9443), runs the integration tests, then tears everything down. Safe to run in CI pipelines.
+
+### Run integration tests against your local server
+
+If you already have `make run` or `make docker-up` running:
+
+```bash
+make test-integration-local
+```
+
+### Run unit tests only
+
+```bash
+make test-unit
+```
+
+### Debug a test failure
+
+Start the isolated test environment and leave it running so you can inspect it:
+
+```bash
+make docker-test-up               # starts on port 9443
+make test-integration-local       # run tests against it
+make docker-test-down             # clean up when done
+```
+
+### Test environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `TEST_HOST` | `localhost` | Server host |
+| `TEST_PORT` | `8443` | Server port |
+| `TEST_SCHEME` | `https` | `http` or `https` |
+| `TEST_SKIP_TLS_VERIFY` | `true` | Skip cert check (set `false` for prod certs) |
+| `MONGO_URI` | `mongodb://localhost:27017` | MongoDB to clean before/after tests |
+| `MONGO_DB` | `userservice` | Database name to clean |
+
+### Pipeline usage (GitHub Actions example)
+
+```yaml
+- name: Run tests
+  run: make test
+```
+
+The `make test` target is fully self-contained — it builds the Docker image, runs all tests, and cleans up automatically.

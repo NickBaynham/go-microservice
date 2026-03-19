@@ -1,0 +1,36 @@
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    ports:
+      - "9443:8443"          # different port to avoid conflict with dev
+    environment:
+      MONGO_URI: mongodb://mongo-test:27017
+      MONGO_DB: userservice_test
+      ENV: test
+      TLS_PORT: "8443"
+      TLS_CERT: /app/certs/dev-cert.pem
+      TLS_KEY: /app/certs/dev-key.pem
+      JWT_SECRET: test-jwt-secret-do-not-use-in-prod
+      JWT_EXPIRE_HOURS: "1"
+    volumes:
+      - ../certs:/app/certs
+      - ../docs:/app/docs
+    depends_on:
+      mongo-test:
+        condition: service_healthy
+    restart: no
+
+  mongo-test:
+    image: mongo:7
+    ports:
+      - "27117:27017"      # exposed on non-standard port to avoid conflict with dev mongo
+    tmpfs:
+      - /data/db          # in-memory — fast and discarded after tests
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: no

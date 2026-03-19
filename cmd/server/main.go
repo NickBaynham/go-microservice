@@ -1,3 +1,22 @@
+// @title           go-microservice API
+// @version         1.0
+// @description     A production-ready user management REST API with JWT authentication.
+
+// @contact.name    API Support
+// @contact.email   support@example.com
+
+// @license.name    MIT
+// @license.url     https://opensource.org/licenses/MIT
+
+// @host            localhost:8443
+// @BasePath        /
+
+// @schemes         https
+
+// @securityDefinitions.apikey  BearerAuth
+// @in                          header
+// @name                        Authorization
+// @description                 Enter your JWT token as: Bearer <token>
 package main
 
 import (
@@ -10,17 +29,24 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	swaggerfiles "github.com/swaggo/files"
+	ginSwagger "github.com/swaggo/gin-swagger"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
+
+	"go-microservice/docs"
 	"go-microservice/internal/config"
 	"go-microservice/internal/handlers"
 	"go-microservice/internal/middleware"
 	"go-microservice/internal/repository"
 	appTLS "go-microservice/internal/tls"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 func main() {
 	cfg := config.Load()
+
+	// Update swagger host dynamically
+	docs.SwaggerInfo.Host = "localhost:" + cfg.TLSPort
 
 	// Connect to MongoDB
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -48,17 +74,10 @@ func main() {
 	r := gin.Default()
 	r.SetTrustedProxies(nil) //nolint:errcheck
 
-	// Redirect HTTP → HTTPS (only in prod where we bind both ports)
-	if cfg.Env == "production" {
-		r.Use(func(c *gin.Context) {
-			if c.Request.TLS == nil {
-				url := "https://" + c.Request.Host + c.Request.RequestURI
-				c.Redirect(http.StatusMovedPermanently, url)
-				c.Abort()
-				return
-			}
-			c.Next()
-		})
+	// Swagger UI (disable in production)
+	if cfg.Env != "production" {
+		r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerfiles.Handler))
+		log.Printf("Swagger UI available at https://localhost:%s/swagger/index.html", cfg.TLSPort)
 	}
 
 	// Public routes

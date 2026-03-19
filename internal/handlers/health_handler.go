@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"go-microservice/internal/models"
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
@@ -17,7 +18,14 @@ func NewHealthHandler(mongo *mongo.Client) *HealthHandler {
 	return &HealthHandler{mongo: mongo}
 }
 
-// GET /health
+// Health godoc
+// @Summary      Health check
+// @Description  Returns the health status of the service and its dependencies.
+// @Tags         system
+// @Produce      json
+// @Success      200  {object}  models.HealthResponse  "Service is healthy"
+// @Failure      503  {object}  models.HealthResponse  "Service is degraded"
+// @Router       /health [get]
 func (h *HealthHandler) Health(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -32,11 +40,9 @@ func (h *HealthHandler) Health(c *gin.Context) {
 		status = http.StatusServiceUnavailable
 	}
 
-	c.JSON(status, gin.H{
-		"status":    map[bool]string{true: "healthy", false: "degraded"}[mongoStatus == "ok"],
-		"timestamp": time.Now().UTC(),
-		"checks": gin.H{
-			"mongodb": mongoStatus,
-		},
+	c.JSON(status, models.HealthResponse{
+		Status:    map[bool]string{true: "healthy", false: "degraded"}[mongoStatus == "ok"],
+		Timestamp: time.Now().UTC(),
+		Checks:    map[string]string{"mongodb": mongoStatus},
 	})
 }

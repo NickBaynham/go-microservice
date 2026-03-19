@@ -1,0 +1,401 @@
+basePath: /
+definitions:
+  go-microservice_internal_models.CreateUserRequest:
+    description: Registration request body
+    properties:
+      email:
+        example: alice@example.com
+        type: string
+      name:
+        example: Alice Smith
+        minLength: 2
+        type: string
+      password:
+        example: securepassword
+        minLength: 8
+        type: string
+      role:
+        example: user
+        type: string
+    required:
+    - email
+    - name
+    - password
+    type: object
+  go-microservice_internal_models.ErrorResponse:
+    description: Error response
+    properties:
+      error:
+        example: invalid credentials
+        type: string
+    type: object
+  go-microservice_internal_models.HealthResponse:
+    description: Health check response
+    properties:
+      checks:
+        additionalProperties:
+          type: string
+        type: object
+      status:
+        example: healthy
+        type: string
+      timestamp:
+        example: "2024-01-01T00:00:00Z"
+        type: string
+    type: object
+  go-microservice_internal_models.ListUsersResponse:
+    description: List of users response
+    properties:
+      count:
+        example: 5
+        type: integer
+      users:
+        items:
+          $ref: '#/definitions/go-microservice_internal_models.User'
+        type: array
+    type: object
+  go-microservice_internal_models.LoginRequest:
+    description: Login request body
+    properties:
+      email:
+        example: alice@example.com
+        type: string
+      password:
+        example: securepassword
+        type: string
+    required:
+    - email
+    - password
+    type: object
+  go-microservice_internal_models.LoginResponse:
+    description: Successful login response containing JWT and user info
+    properties:
+      token:
+        example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+        type: string
+      user:
+        $ref: '#/definitions/go-microservice_internal_models.User'
+    type: object
+  go-microservice_internal_models.MessageResponse:
+    description: Success message response
+    properties:
+      message:
+        example: user deleted successfully
+        type: string
+    type: object
+  go-microservice_internal_models.RegisterResponse:
+    description: Successful registration response
+    properties:
+      message:
+        example: user registered successfully
+        type: string
+      user:
+        $ref: '#/definitions/go-microservice_internal_models.User'
+    type: object
+  go-microservice_internal_models.UpdateUserRequest:
+    description: Update request body (all fields optional)
+    properties:
+      email:
+        example: newemail@example.com
+        type: string
+      name:
+        example: Alice Updated
+        minLength: 2
+        type: string
+      role:
+        example: admin
+        type: string
+    type: object
+  go-microservice_internal_models.User:
+    description: User account information
+    properties:
+      created_at:
+        example: "2024-01-01T00:00:00Z"
+        type: string
+      email:
+        example: alice@example.com
+        type: string
+      id:
+        example: 64b1f9e2c3d4e5f6a7b8c9d0
+        type: string
+      name:
+        example: Alice Smith
+        type: string
+      role:
+        example: user
+        type: string
+      updated_at:
+        example: "2024-01-01T00:00:00Z"
+        type: string
+    type: object
+host: localhost:8443
+info:
+  contact:
+    email: support@example.com
+    name: API Support
+  description: A production-ready user management REST API with JWT authentication.
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  title: go-microservice API
+  version: "1.0"
+paths:
+  /auth/login:
+    post:
+      consumes:
+      - application/json
+      description: Authenticates a user and returns a signed JWT token.
+      parameters:
+      - description: Login credentials
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/go-microservice_internal_models.LoginRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.LoginResponse'
+        "400":
+          description: Validation error
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "401":
+          description: Invalid credentials
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "500":
+          description: Internal server error
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+      summary: Login
+      tags:
+      - auth
+  /auth/register:
+    post:
+      consumes:
+      - application/json
+      description: Creates a new user account. The role defaults to "user" if not
+        provided.
+      parameters:
+      - description: Registration details
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/go-microservice_internal_models.CreateUserRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.RegisterResponse'
+        "400":
+          description: Validation error
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "409":
+          description: Email already exists
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "500":
+          description: Internal server error
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+      summary: Register a new user
+      tags:
+      - auth
+  /health:
+    get:
+      description: Returns the health status of the service and its dependencies.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Service is healthy
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.HealthResponse'
+        "503":
+          description: Service is degraded
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.HealthResponse'
+      summary: Health check
+      tags:
+      - system
+  /me:
+    get:
+      description: Returns the profile of the currently authenticated user.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.User'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "404":
+          description: User not found
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Get current user
+      tags:
+      - users
+  /users:
+    get:
+      description: Returns all users in the system. Admin only.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ListUsersResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "403":
+          description: Admin access required
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "500":
+          description: Internal server error
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: List all users
+      tags:
+      - users
+  /users/{id}:
+    delete:
+      description: Permanently deletes a user by ID. Admin only.
+      parameters:
+      - description: User ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.MessageResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "403":
+          description: Admin access required
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "404":
+          description: User not found
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Delete a user
+      tags:
+      - users
+    get:
+      description: Returns a single user by their ID. Admin only.
+      parameters:
+      - description: User ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.User'
+        "400":
+          description: Invalid ID
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "403":
+          description: Admin access required
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "404":
+          description: User not found
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Get a user by ID
+      tags:
+      - users
+    put:
+      consumes:
+      - application/json
+      description: Updates a user's profile. Users can update themselves; admins can
+        update anyone and change roles.
+      parameters:
+      - description: User ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Fields to update
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/go-microservice_internal_models.UpdateUserRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.User'
+        "400":
+          description: Validation error or no fields to update
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "404":
+          description: User not found
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Update a user
+      tags:
+      - users
+schemes:
+- https
+securityDefinitions:
+  BearerAuth:
+    description: 'Enter your JWT token as: Bearer <token>'
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"

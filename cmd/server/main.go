@@ -31,15 +31,14 @@ import (
 	"github.com/gin-gonic/gin"
 	swaggerfiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
-
 	"go-microservice/docs"
 	"go-microservice/internal/config"
 	"go-microservice/internal/handlers"
 	"go-microservice/internal/middleware"
 	"go-microservice/internal/repository"
 	appTLS "go-microservice/internal/tls"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 func main() {
@@ -77,6 +76,9 @@ func main() {
 	// Swagger UI (disable in production)
 	if cfg.Env != "production" {
 		r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerfiles.Handler))
+		r.GET("/", func(c *gin.Context) {
+			c.Redirect(http.StatusMovedPermanently, "/swagger/index.html")
+		})
 		log.Printf("Swagger UI available at https://localhost:%s/swagger/index.html", cfg.TLSPort)
 	}
 

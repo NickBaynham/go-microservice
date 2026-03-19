@@ -1,14 +1,21 @@
-version: "3.9"
-
 services:
   app:
-    build: .
+    build:
+      context: ..
+      dockerfile: Dockerfile
     ports:
-      - "8080:8080"
+      - "8443:8443"
     env_file:
-      - .env
+      - ../.env
     environment:
       MONGO_URI: mongodb://mongo:27017
+      ENV: development
+      TLS_PORT: "8443"
+      TLS_CERT: /app/certs/dev-cert.pem
+      TLS_KEY: /app/certs/dev-key.pem
+    volumes:
+      - ../certs:/app/certs
+      - ../docs:/app/docs
     depends_on:
       mongo:
         condition: service_healthy

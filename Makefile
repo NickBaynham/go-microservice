@@ -1,6 +1,8 @@
 .PHONY: help setup check-go check-brew install-go install-swag env deps run build clean \
         docker-up docker-down docker-prod-up docker-prod-down \
-        certs certs-trust certs-check certs-clean test docs
+        docker-test-up docker-test-down \
+        certs certs-trust certs-check certs-clean \
+        test test-unit test-integration test-integration-local docs
 
 GOMIN        := 1.22
 GOROOT_BREW  := $(shell brew --prefix go 2>/dev/null)/bin/go
@@ -146,11 +148,6 @@ build: check-go docs
 	@go build -ldflags="-s -w" -o bin/$(APP) $(CMD)
 	@echo "  ✔ Binary available at bin/$(APP)"
 
-## test: Run tests
-test: check-go
-	@echo "→ Running tests..."
-	@go test ./... -v
-
 ## clean: Remove build artifacts and generated docs
 clean:
 	@echo "→ Cleaning..."
@@ -209,3 +206,61 @@ letsencrypt:
 	@echo "  ✔ Certificate obtained for $(DOMAIN)"
 	@echo "  Next: update deployments/nginx/conf.d/app.conf with your domain"
 	@echo "        then run: make docker-prod-up"
+
+# ── Testing ───────────────────────────────────────────────────────────────────
+
+## test-unit: Run unit tests only
+test-unit: check-go
+	@echo "→ Running unit tests..."
+	@go test ./internal/... -v -count=1
+	@echo "  ✔ Unit tests passed"
+
+## test-integration-local: Run integration tests against your local running server
+## Requires: make run or make docker-up to be running first
+test-integration-local: check-go
+	@echo "→ Running integration tests against local server (https://localhost:8443)..."
+	@TEST_HOST=localhost \
+	 TEST_PORT=8443 \
+	 TEST_SCHEME=https \
+	 TEST_SKIP_TLS_VERIFY=true \
+	 MONGO_URI=mongodb://localhost:27017 \
+	 MONGO_DB=userservice \
+	 go test ./tests/integration/... -v -count=1 -timeout 60s
+	@echo "  ✔ Integration tests passed"
+
+## test-integration: Run integration tests in isolated Docker environment (pipeline-safe)
+test-integration: check-go certs
+	@echo "→ Starting isolated test environment..."
+	@docker compose -f deployments/docker-compose.test.yml up -d --build --wait
+	@echo "→ Running integration tests..."
+	@TEST_HOST=localhost \
+	 TEST_PORT=9443 \
+	 TEST_SCHEME=https \
+	 TEST_SKIP_TLS_VERIFY=true \
+	 MONGO_URI=mongodb://localhost:27117 \
+	 MONGO_DB=userservice_test \
+	 go test ./tests/integration/... -v -count=1 -timeout 120s; \
+	 EXIT_CODE=$$?; \
+	 docker compose -f deployments/docker-compose.test.yml down; \
+	 exit $$EXIT_CODE
+
+## test: Run unit tests + integration tests in Docker (full pipeline suite)
+test: test-unit test-integration
+	@echo ""
+	@echo "✅  All tests passed!"
+	@echo ""
+
+## docker-test-up: Start isolated test environment (for debugging test failures)
+docker-test-up: certs
+	@echo "→ Starting test Docker environment on port 9443..."
+	@docker compose -f deployments/docker-compose.test.yml up -d --build --wait
+	@echo "  ✔ Test environment ready"
+	@echo "  ✔ API:   https://localhost:9443"
+	@echo "  ✔ Mongo: localhost:27117"
+	@echo "  ✔ Run tests: MONGO_URI=mongodb://localhost:27117 MONGO_DB=userservice_test make test-integration-local TEST_PORT=9443"
+
+## docker-test-down: Stop isolated test environment
+docker-test-down:
+	@echo "→ Stopping test Docker environment..."
+	@docker compose -f deployments/docker-compose.test.yml down
+	@echo "  ✔ Done"

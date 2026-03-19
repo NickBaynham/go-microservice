@@ -1,5 +1,5 @@
 # ---- Build stage ----
-FROM golang:1.22-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 WORKDIR /app
 
@@ -17,6 +17,6 @@ FROM scratch
 COPY --from=builder /user-service /user-service
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
-EXPOSE 8080
+EXPOSE 8443
 
 ENTRYPOINT ["/user-service"]

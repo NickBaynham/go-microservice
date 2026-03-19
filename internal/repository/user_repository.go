@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/example/go-microservice/internal/models"
+	"go-microservice/internal/models"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"

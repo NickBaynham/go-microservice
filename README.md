@@ -1,11 +1,12 @@
-# User Service
+# go-microservice
 
 A production-ready Go REST API microservice for user management, featuring JWT authentication, MongoDB integration, and Docker support.
 
 ## Project Structure
 
 ```
-user-service/
+go-microservice/
+├── Makefile             # Developer commands
 ├── cmd/server/          # Entry point
 ├── internal/
 │   ├── auth/            # JWT helpers
@@ -45,33 +46,48 @@ user-service/
 ## Getting Started
 
 ### Prerequisites
-- Go 1.22+
+- [Homebrew](https://brew.sh) (macOS) — used to install Go
 - Docker & Docker Compose (for containerized setup)
 
-### Run locally
+### Quickstart (new developers)
 
 ```bash
-# 1. Clone and enter the directory
-cd user-service
-
-# 2. Copy environment file
-cp .env.example .env
-
-# 3. Install dependencies
-go mod tidy
-
-# 4. Start MongoDB (or update MONGO_URI in .env)
-docker run -d -p 27017:27017 mongo:7
-
-# 5. Run the server
-go run ./cmd/server
+git clone <repo-url>
+cd go-microservice
+make setup   # installs Go, creates .env, downloads dependencies
+make run     # starts the server at http://localhost:8080
 ```
+
+That's it! `make setup` handles everything — no need to manually install Go or copy `.env`.
+
+### All available Make commands
+
+| Command | Description |
+|---|---|
+| `make setup` | Full onboarding — installs Go, creates .env, pulls deps |
+| `make run` | Start the server locally |
+| `make build` | Compile binary to `bin/` |
+| `make test` | Run all tests |
+| `make docker-up` | Start app + MongoDB via Docker Compose |
+| `make docker-down` | Stop Docker services |
+| `make clean` | Remove build artifacts |
+| `make help` | List all commands |
 
 ### Run with Docker Compose
 
 ```bash
-cp .env.example .env
-docker compose -f deployments/docker-compose.yml up --build
+make docker-up
+```
+
+### ⚠️ GoLand users
+
+GoLand sets `GOROOT` automatically and may point to an old Go installation. If you see `cannot find GOROOT directory`, update it in:
+
+**Settings → Build, Execution, Deployment → Go → GOROOT**
+
+Set it to the output of:
+```bash
+brew --prefix go
 ```
 
 ## Example Usage
@@ -110,17 +126,3 @@ curl http://localhost:8080/health
 | MONGO_DB          | userservice                | Database name          |
 | JWT_SECRET        | change-me-in-production    | JWT signing secret     |
 | JWT_EXPIRE_HOURS  | 24                         | Token expiry in hours  |
-
-## .env
-Your .env should look like this example:
-```
-PORT=8080
-MONGO_URI=mongodb://localhost:27017
-MONGO_DB=userservice
-JWT_SECRET=change-me-in-production-use-a-long-random-string
-JWT_EXPIRE_HOURS=24
-```
-To create a JWT secret do this:
-```
-openssl rand -hex 32
-```

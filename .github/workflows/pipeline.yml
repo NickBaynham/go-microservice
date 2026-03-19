@@ -1,0 +1,322 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform on prod'
+        required: true
+        type: choice
+        options: [deploy-prod, destroy-prod]
+
+env:
+  AWS_REGION:     us-east-1
+  ECR_REPOSITORY: go-microservice
+  CDK_DIR:        infrastructure/cdk
+
+jobs:
+
+  # ── Unit Tests ───────────────────────────────────────────────────────────────
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+      - name: Install swag
+        run: go install github.com/swaggo/swag/cmd/swag@latest
+      - name: Generate docs
+        run: swag init -g cmd/server/main.go -o docs --parseDependency --parseInternal
+      - name: Run unit tests
+        run: go test ./internal/... -v -count=1 -race -timeout 60s
+
+  # ── Integration Tests ────────────────────────────────────────────────────────
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+      - name: Install swag
+        run: go install github.com/swaggo/swag/cmd/swag@latest
+      - name: Generate docs
+        run: swag init -g cmd/server/main.go -o docs --parseDependency --parseInternal
+      - name: Generate dev certs
+        run: |
+          mkdir -p certs
+          openssl req -x509 -newkey ec \
+            -pkeyopt ec_paramgen_curve:P-256 \
+            -keyout certs/dev-key.pem \
+            -out certs/dev-cert.pem \
+            -days 365 -nodes \
+            -subj "/CN=localhost/O=go-microservice-ci" \
+            -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+      - name: Start test environment
+        run: docker compose -f deployments/docker-compose.test.yml up -d --build --wait
+        timeout-minutes: 5
+      - name: Run integration tests
+        run: |
+          TEST_HOST=localhost \
+          TEST_PORT=9443 \
+          TEST_SCHEME=https \
+          TEST_SKIP_TLS_VERIFY=true \
+          MONGO_URI=mongodb://localhost:27117 \
+          MONGO_DB=userservice_test \
+          go test ./tests/integration/... -v -count=1 -timeout 120s
+      - name: Print container logs on failure
+        if: failure()
+        run: docker compose -f deployments/docker-compose.test.yml logs
+      - name: Tear down test environment
+        if: always()
+        run: docker compose -f deployments/docker-compose.test.yml down
+
+  # ── Build & Push to ECR ──────────────────────────────────────────────────────
+  build:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    needs: integration-tests
+    if: github.ref == 'refs/heads/main' && github.event_name != 'workflow_dispatch'
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+      ecr_url:   ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+      - name: Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      - name: Set image tag
+        id: meta
+        run: echo "tag=$(echo ${{ github.sha }} | head -c7)" >> $GITHUB_OUTPUT
+      - name: Install swag and generate docs
+        run: |
+          go install github.com/swaggo/swag/cmd/swag@latest
+          swag init -g cmd/server/main.go -o docs --parseDependency --parseInternal
+      - name: Build and push image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG:    ${{ steps.meta.outputs.tag }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker tag  $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+                      $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+  # ── Deploy to Dev ─────────────────────────────────────────────────────────────
+  deploy-dev:
+    name: Deploy → Dev → Smoke Test → Destroy
+    runs-on: ubuntu-latest
+    needs: build
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+      - uses: actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+      - name: Install AWS CDK
+        run: npm install -g aws-cdk
+      - name: Install CDK Go dependencies
+        run: cd $CDK_DIR && go mod download
+      - name: CDK deploy (dev)
+        env:
+          CDK_ENV: dev
+          CDK_REGION: ${{ env.AWS_REGION }}
+          CDK_ACCOUNT: ${{ secrets.AWS_ACCOUNT_ID }}
+          CDK_APP_IMAGE: ${{ needs.build.outputs.ecr_url }}:${{ needs.build.outputs.image_tag }}
+          CDK_CERT_ARN: ${{ secrets.ACM_CERTIFICATE_ARN }}
+          CDK_JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          CDK_DESIRED_COUNT: "1"
+          CDK_TASK_CPU: "256"
+          CDK_TASK_MEMORY: "512"
+        run: cd $CDK_DIR && cdk deploy GoMicroservice-Dev --require-approval never --outputs-file outputs.json
+      - name: Wait for healthy
+        run: |
+          ALB=$(cat $CDK_DIR/outputs.json | python3 -c "import sys,json; d=json.load(sys.stdin); print(list(d.values())[0]['ALBDnsName'])")
+          for i in $(seq 1 20); do
+            S=$(curl -sk https://$ALB/health | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
+            echo "[$i] $S"; [ "$S" = "healthy" ] && break; sleep 15
+          done
+          [ "$S" = "healthy" ] || exit 1
+      - name: Smoke test
+        run: |
+          ALB=$(cat $CDK_DIR/outputs.json | python3 -c "import sys,json; d=json.load(sys.stdin); print(list(d.values())[0]['ALBDnsName'])")
+          TEST_HOST=$ALB TEST_PORT=443 TEST_SCHEME=https TEST_SKIP_TLS_VERIFY=false \
+          go test ./tests/integration/... -v -count=1 -run "TestAPI/GET_/health" -timeout 30s
+      - name: CDK destroy (dev)
+        if: always()
+        env:
+          CDK_ENV: dev
+          CDK_REGION: ${{ env.AWS_REGION }}
+          CDK_ACCOUNT: ${{ secrets.AWS_ACCOUNT_ID }}
+          CDK_APP_IMAGE: ${{ needs.build.outputs.ecr_url }}:${{ needs.build.outputs.image_tag }}
+          CDK_CERT_ARN: ${{ secrets.ACM_CERTIFICATE_ARN }}
+          CDK_JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          CDK_DESIRED_COUNT: "1"
+          CDK_TASK_CPU: "256"
+          CDK_TASK_MEMORY: "512"
+        run: cd $CDK_DIR && cdk destroy GoMicroservice-Dev --force
+
+  # ── Deploy to Test ────────────────────────────────────────────────────────────
+  deploy-test:
+    name: Deploy → Test → Full Tests → Destroy
+    runs-on: ubuntu-latest
+    needs: [build, deploy-dev]
+    environment: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+      - name: Install AWS CDK
+        run: npm install -g aws-cdk
+      - name: Install CDK Go dependencies
+        run: cd $CDK_DIR && go mod download
+      - name: CDK deploy (test)
+        env:
+          CDK_ENV: test
+          CDK_REGION: ${{ env.AWS_REGION }}
+          CDK_ACCOUNT: ${{ secrets.AWS_ACCOUNT_ID }}
+          CDK_APP_IMAGE: ${{ needs.build.outputs.ecr_url }}:${{ needs.build.outputs.image_tag }}
+          CDK_CERT_ARN: ${{ secrets.ACM_CERTIFICATE_ARN }}
+          CDK_JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          CDK_DESIRED_COUNT: "1"
+          CDK_TASK_CPU: "512"
+          CDK_TASK_MEMORY: "1024"
+        run: cd $CDK_DIR && cdk deploy GoMicroservice-Test --require-approval never --outputs-file outputs.json
+      - name: Wait for healthy
+        run: |
+          ALB=$(cat $CDK_DIR/outputs.json | python3 -c "import sys,json; d=json.load(sys.stdin); print(list(d.values())[0]['ALBDnsName'])")
+          for i in $(seq 1 20); do
+            S=$(curl -sk https://$ALB/health | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
+            echo "[$i] $S"; [ "$S" = "healthy" ] && break; sleep 15
+          done
+          [ "$S" = "healthy" ] || exit 1
+      - name: Full integration tests
+        run: |
+          ALB=$(cat $CDK_DIR/outputs.json | python3 -c "import sys,json; d=json.load(sys.stdin); print(list(d.values())[0]['ALBDnsName'])")
+          TEST_HOST=$ALB TEST_PORT=443 TEST_SCHEME=https TEST_SKIP_TLS_VERIFY=false \
+          go test ./tests/integration/... -v -count=1 -timeout 120s
+      - name: CDK destroy (test)
+        if: always()
+        env:
+          CDK_ENV: test
+          CDK_REGION: ${{ env.AWS_REGION }}
+          CDK_ACCOUNT: ${{ secrets.AWS_ACCOUNT_ID }}
+          CDK_APP_IMAGE: ${{ needs.build.outputs.ecr_url }}:${{ needs.build.outputs.image_tag }}
+          CDK_CERT_ARN: ${{ secrets.ACM_CERTIFICATE_ARN }}
+          CDK_JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          CDK_DESIRED_COUNT: "1"
+          CDK_TASK_CPU: "512"
+          CDK_TASK_MEMORY: "1024"
+        run: cd $CDK_DIR && cdk destroy GoMicroservice-Test --force
+
+  # ── Deploy to Prod (manual approval) ─────────────────────────────────────────
+  deploy-prod:
+    name: Deploy → Prod
+    runs-on: ubuntu-latest
+    needs: [build, deploy-test]
+    environment: prod
+    if: |
+      (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'deploy-prod')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+      - name: Install AWS CDK
+        run: npm install -g aws-cdk
+      - name: Install CDK Go dependencies
+        run: cd $CDK_DIR && go mod download
+      - name: CDK deploy (prod)
+        env:
+          CDK_ENV: prod
+          CDK_REGION: ${{ env.AWS_REGION }}
+          CDK_ACCOUNT: ${{ secrets.AWS_ACCOUNT_ID }}
+          CDK_APP_IMAGE: ${{ needs.build.outputs.ecr_url }}:${{ needs.build.outputs.image_tag }}
+          CDK_CERT_ARN: ${{ secrets.ACM_CERTIFICATE_ARN }}
+          CDK_JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          CDK_DESIRED_COUNT: "2"
+          CDK_TASK_CPU: "512"
+          CDK_TASK_MEMORY: "1024"
+        run: |
+          cd $CDK_DIR
+          cdk deploy GoMicroservice-Prod --require-approval never --outputs-file outputs.json
+          ALB=$(cat outputs.json | python3 -c "import sys,json; d=json.load(sys.stdin); print(list(d.values())[0]['ALBDnsName'])")
+          echo "✅ Prod deployed! URL: https://$ALB"
+          echo "   Tear down: Actions → Run workflow → destroy-prod"
+
+  # ── Destroy Prod (manual trigger only) ───────────────────────────────────────
+  destroy-prod:
+    name: Destroy Prod
+    runs-on: ubuntu-latest
+    environment: prod
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy-prod'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+      - name: Install AWS CDK
+        run: npm install -g aws-cdk
+      - name: Install CDK Go dependencies
+        run: cd $CDK_DIR && go mod download
+      - name: Get latest ECR image tag
+        id: ecr
+        run: |
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          TAG=$(aws ecr describe-images \
+            --repository-name $ECR_REPOSITORY \
+            --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags[0]' \
+            --output text)
+          echo "image=$ACCOUNT.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/$ECR_REPOSITORY:$TAG" >> $GITHUB_OUTPUT
+      - name: CDK destroy (prod)
+        env:
+          CDK_ENV: prod
+          CDK_REGION: ${{ env.AWS_REGION }}
+          CDK_ACCOUNT: ${{ secrets.AWS_ACCOUNT_ID }}
+          CDK_APP_IMAGE: ${{ steps.ecr.outputs.image }}
+          CDK_CERT_ARN: ${{ secrets.ACM_CERTIFICATE_ARN }}
+          CDK_JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          CDK_DESIRED_COUNT: "2"
+          CDK_TASK_CPU: "512"
+          CDK_TASK_MEMORY: "1024"
+        run: cd $CDK_DIR && cdk destroy GoMicroservice-Prod --force
+      - run: echo "✅ Prod destroyed — zero ongoing cost"

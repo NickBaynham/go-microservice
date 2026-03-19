@@ -1,0 +1,117 @@
+{
+	"info": {
+		"_postman_id": "814339d5-b483-4269-bb7c-fb24fac71479",
+		"name": "go-microservice",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+		"_exporter_id": "2881190",
+		"_collection_link": "https://galactic-crater-130052.postman.co/workspace/My-Workspace~cc302b7a-5c9e-4f06-8e99-5cc8825958fd/collection/2881190-814339d5-b483-4269-bb7c-fb24fac71479?action=share&source=collection_link&creator=2881190"
+	},
+	"item": [
+		{
+			"name": "health",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{endpoint}}/health",
+					"host": [
+						"{{endpoint}}"
+					],
+					"path": [
+						"health"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "auth/register",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json",
+						"type": "text"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"name\":\"Alice\",\n    \"email\":\"alice@example.com\",\n    \"password\":\"secret123\"\n}"
+				},
+				"url": {
+					"raw": "{{endpoint}}/auth/register",
+					"host": [
+						"{{endpoint}}"
+					],
+					"path": [
+						"auth",
+						"register"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "/auth/login",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json",
+						"type": "text"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\"email\":\"alice@example.com\",\"password\":\"secret123\"}"
+				},
+				"url": {
+					"raw": "{{endpoint}}/auth/login",
+					"host": [
+						"{{endpoint}}"
+					],
+					"path": [
+						"auth",
+						"login"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "/me",
+			"request": {
+				"auth": {
+					"type": "bearer",
+					"bearer": [
+						{
+							"key": "token",
+							"value": "{{token}}",
+							"type": "string"
+						}
+					]
+				},
+				"method": "GET",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json",
+						"type": "text"
+					}
+				],
+				"url": {
+					"raw": "{{endpoint}}/me",
+					"host": [
+						"{{endpoint}}"
+					],
+					"path": [
+						"me"
+					]
+				}
+			},
+			"response": []
+		}
+	]
+}

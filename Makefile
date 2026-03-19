@@ -216,7 +216,7 @@ test-unit: check-go
 	@echo "  ✔ Unit tests passed"
 
 ## test-integration-local: Run integration tests against your local running server
-## Requires: make run or make docker-up to be running first
+## Requires: make docker-up to be running first
 test-integration-local: check-go
 	@echo "→ Running integration tests against local server (https://localhost:8443)..."
 	@TEST_HOST=localhost \
@@ -264,3 +264,100 @@ docker-test-down:
 	@echo "→ Stopping test Docker environment..."
 	@docker compose -f deployments/docker-compose.test.yml down
 	@echo "  ✔ Done"
+
+
+# ── AWS / CDK ─────────────────────────────────────────────────────────────────
+
+AWS_REGION  ?= us-east-1
+ENV         ?= dev
+CDK_DIR     := infrastructure/cdk
+
+## cdk-install: Install the AWS CDK CLI
+cdk-install:
+	@echo "→ Installing AWS CDK..."
+	@npm install -g aws-cdk
+	@echo "  ✔ CDK $$(cdk --version)"
+
+## cdk-bootstrap: One-time bootstrap per AWS account/region (creates CDK toolkit stack)
+## Usage: make cdk-bootstrap AWS_ACCOUNT_ID=123456789012
+cdk-bootstrap: cdk-install
+	@echo "→ Bootstrapping CDK for account $(AWS_ACCOUNT_ID) in $(AWS_REGION)..."
+	@cd $(CDK_DIR) && \
+	 CDK_ENV=$(ENV) CDK_REGION=$(AWS_REGION) CDK_ACCOUNT=$(AWS_ACCOUNT_ID) \
+	 CDK_APP_IMAGE=placeholder CDK_CERT_ARN=placeholder CDK_JWT_SECRET=placeholder \
+	 cdk bootstrap aws://$(AWS_ACCOUNT_ID)/$(AWS_REGION)
+	@echo "  ✔ CDK bootstrap complete"
+
+## cdk-diff: Preview infrastructure changes for an environment
+## Usage: make cdk-diff ENV=prod APP_IMAGE=<ecr-url>:<tag>
+cdk-diff:
+	@echo "→ CDK diff for $(ENV)..."
+	@cd $(CDK_DIR) && \
+	 CDK_ENV=$(ENV) CDK_REGION=$(AWS_REGION) CDK_ACCOUNT=$(AWS_ACCOUNT_ID) \
+	 CDK_APP_IMAGE=$(APP_IMAGE) CDK_CERT_ARN=$(ACM_CERT_ARN) CDK_JWT_SECRET=$(JWT_SECRET) \
+	 cdk diff GoMicroservice-$(shell echo $(ENV) | sed 's/./\u&/')
+
+## aws-up: Deploy infrastructure + service for an environment via CDK
+## Usage: make aws-up ENV=prod APP_IMAGE=<ecr-url>:<tag> AWS_ACCOUNT_ID=... ACM_CERT_ARN=... JWT_SECRET=...
+aws-up: cdk-install
+	@echo "→ Deploying $(ENV) via CDK..."
+	@cd $(CDK_DIR) && \
+	 CDK_ENV=$(ENV) CDK_REGION=$(AWS_REGION) CDK_ACCOUNT=$(AWS_ACCOUNT_ID) \
+	 CDK_APP_IMAGE=$(APP_IMAGE) CDK_CERT_ARN=$(ACM_CERT_ARN) CDK_JWT_SECRET=$(JWT_SECRET) \
+	 cdk deploy GoMicroservice-$(shell echo $(ENV) | sed 's/\b./\u&/g') \
+	   --require-approval never --outputs-file outputs-$(ENV).json
+	@ALB=$$(cat $(CDK_DIR)/outputs-$(ENV).json | \
+	  python3 -c "import sys,json; d=json.load(sys.stdin); print(list(d.values())[0]['ALBDnsName'])"); \
+	echo ""; \
+	echo "✅  $(ENV) deployed!"; \
+	echo "    URL: https://$$ALB"; \
+	echo ""; \
+	echo "  Smoke test: make aws-test ENV=$(ENV)"; \
+	echo "  Logs:       make aws-logs ENV=$(ENV)"; \
+	echo "  Tear down:  make aws-down ENV=$(ENV)"
+
+## aws-test: Run integration tests against a live AWS environment
+## Usage: make aws-test ENV=prod
+aws-test: check-go
+	@echo "→ Running integration tests against $(ENV)..."
+	@ALB=$$(cat $(CDK_DIR)/outputs-$(ENV).json | \
+	  python3 -c "import sys,json; d=json.load(sys.stdin); print(list(d.values())[0]['ALBDnsName'])"); \
+	TEST_HOST=$$ALB \
+	TEST_PORT=443 \
+	TEST_SCHEME=https \
+	TEST_SKIP_TLS_VERIFY=false \
+	go test ./tests/integration/... -v -count=1 -timeout 120s
+	@echo "  ✔ Tests passed"
+
+## aws-logs: Tail CloudWatch logs for an environment
+## Usage: make aws-logs ENV=prod
+aws-logs:
+	@echo "→ Tailing logs for $(ENV)..."
+	@aws logs tail /ecs/go-microservice-$(ENV)/app --follow --region $(AWS_REGION)
+
+## aws-down: Destroy all infrastructure for an environment (zero cost)
+## Usage: make aws-down ENV=prod APP_IMAGE=<ecr-url>:<tag> AWS_ACCOUNT_ID=... ACM_CERT_ARN=... JWT_SECRET=...
+aws-down: cdk-install
+	@echo "→ Destroying $(ENV) via CDK..."
+	@echo "  ⚠️  This removes ALL $(ENV) resources. Ctrl+C to cancel."
+	@sleep 3
+	@cd $(CDK_DIR) && \
+	 CDK_ENV=$(ENV) CDK_REGION=$(AWS_REGION) CDK_ACCOUNT=$(AWS_ACCOUNT_ID) \
+	 CDK_APP_IMAGE=$(APP_IMAGE) CDK_CERT_ARN=$(ACM_CERT_ARN) CDK_JWT_SECRET=$(JWT_SECRET) \
+	 cdk destroy GoMicroservice-$(shell echo $(ENV) | sed 's/\b./\u&/g') --force
+	@echo "✅  $(ENV) destroyed — zero ongoing cost"
+
+## aws-ecr-push: Build and push image to ECR
+## Usage: make aws-ecr-push TAG=abc1234 AWS_ACCOUNT_ID=123456789012
+aws-ecr-push: docs
+	@echo "→ Building and pushing to ECR..."
+	@aws ecr get-login-password --region $(AWS_REGION) | \
+	  docker login --username AWS --password-stdin $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com
+	@docker build -t go-microservice:$(TAG) .
+	@docker tag go-microservice:$(TAG) \
+	  $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/go-microservice:$(TAG)
+	@docker tag go-microservice:$(TAG) \
+	  $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/go-microservice:latest
+	@docker push $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/go-microservice:$(TAG)
+	@docker push $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/go-microservice:latest
+	@echo "  ✔ Pushed: $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/go-microservice:$(TAG)"

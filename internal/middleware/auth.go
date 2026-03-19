@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"strings"
 
-	"go-microservice/internal/auth"
 	"github.com/gin-gonic/gin"
+	"go-microservice/internal/auth"
 )
 
 func AuthRequired(jwtSecret string) gin.HandlerFunc {

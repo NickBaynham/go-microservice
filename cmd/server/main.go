@@ -9,11 +9,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"go-microservice/internal/config"
 	"go-microservice/internal/handlers"
 	"go-microservice/internal/middleware"
 	"go-microservice/internal/repository"
-	"github.com/gin-gonic/gin"
+	appTLS "go-microservice/internal/tls"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -47,6 +48,19 @@ func main() {
 	r := gin.Default()
 	r.SetTrustedProxies(nil) //nolint:errcheck
 
+	// Redirect HTTP → HTTPS (only in prod where we bind both ports)
+	if cfg.Env == "production" {
+		r.Use(func(c *gin.Context) {
+			if c.Request.TLS == nil {
+				url := "https://" + c.Request.Host + c.Request.RequestURI
+				c.Redirect(http.StatusMovedPermanently, url)
+				c.Abort()
+				return
+			}
+			c.Next()
+		})
+	}
+
 	// Public routes
 	r.GET("/health", healthHandler.Health)
 	r.POST("/auth/register", userHandler.Register)
@@ -69,15 +83,40 @@ func main() {
 		}
 	}
 
+	// Build TLS config
+	tlsCfg := appTLS.MustGetTLSConfig(&appTLS.Config{
+		CertFile: cfg.TLSCert,
+		KeyFile:  cfg.TLSKey,
+		Env:      cfg.Env,
+	})
+
+	httpsPort := cfg.TLSPort
 	srv := &http.Server{
-		Addr:    ":" + cfg.Port,
-		Handler: r,
+		Addr:      ":" + httpsPort,
+		Handler:   r,
+		TLSConfig: tlsCfg,
+	}
+
+	// In production also spin up an HTTP server that redirects to HTTPS
+	if cfg.Env == "production" {
+		go func() {
+			redirectSrv := &http.Server{
+				Addr: ":80",
+				Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					http.Redirect(w, r, "https://"+r.Host+r.RequestURI, http.StatusMovedPermanently)
+				}),
+			}
+			log.Println("HTTP redirect server listening on :80")
+			if err := redirectSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("HTTP redirect server error: %v", err)
+			}
+		}()
 	}
 
 	// Graceful shutdown
 	go func() {
-		log.Printf("Server starting on port %s", cfg.Port)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Printf("HTTPS server starting on port %s (env=%s)", httpsPort, cfg.Env)
+		if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("listen: %v", err)
 		}
 	}()

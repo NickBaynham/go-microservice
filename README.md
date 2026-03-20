@@ -280,3 +280,235 @@ make docker-test-down             # clean up when done
 ```
 
 The `make test` target is fully self-contained — it builds the Docker image, runs all tests, and cleans up automatically.
+
+---
+
+## Deploying to AWS
+
+This service deploys to AWS ECS Fargate via AWS CDK. The infrastructure is defined in Go in `infrastructure/cdk/` and managed entirely through `make` commands.
+
+### Architecture
+
+```
+Internet → ALB (HTTPS/443) → ECS Fargate Task
+                                 ├── app container  (go-microservice)
+                                 └── mongo container (MongoDB sidecar)
+```
+
+All infrastructure is created and destroyed on demand — you pay only when the service is running (~$0.05/hr). See the cost breakdown at the end of this section.
+
+### Prerequisites
+
+- AWS CLI configured (`aws configure`)
+- Node.js 18+ (`brew install node`)
+- AWS CDK CLI (`npm install -g aws-cdk`)
+- A domain in Route 53
+
+### ⚠️ New AWS account — clean bootstrap required
+
+If you have previously used CDK in this AWS account, you may have a stale `CDKToolkit` CloudFormation stack. Before bootstrapping, check for and clean up any leftover resources:
+
+```bash
+# Check if CDKToolkit stack already exists
+aws cloudformation describe-stacks \
+  --stack-name CDKToolkit \
+  --region us-east-1 2>/dev/null | grep StackStatus
+```
+
+If it exists and is in a broken state (`UPDATE_ROLLBACK_COMPLETE`, `ROLLBACK_COMPLETE`):
+
+```bash
+# 1. Delete any leftover CDK S3 bucket (empty it first in the console if it has contents)
+aws s3 rb s3://cdk-hnb659fds-assets-<your-account-id>-us-east-1 --force 2>/dev/null
+
+# 2. Delete the broken stack
+aws cloudformation delete-stack --stack-name CDKToolkit --region us-east-1
+aws cloudformation wait stack-delete-complete --stack-name CDKToolkit --region us-east-1
+```
+
+Then proceed with the steps below.
+
+### Step 1 — Request an ACM certificate
+
+The ALB requires a trusted TLS certificate. Request one for your API subdomain:
+
+```bash
+aws acm request-certificate \
+  --domain-name api.yourdomain.com \
+  --validation-method DNS \
+  --region us-east-1
+```
+
+Get the DNS validation record ACM needs:
+
+```bash
+aws acm describe-certificate \
+  --certificate-arn <your-cert-arn> \
+  --region us-east-1 \
+  --query 'Certificate.DomainValidationOptions'
+```
+
+Add the returned CNAME to your Route 53 hosted zone:
+
+| Field | Value |
+|---|---|
+| Record name | The `Name` from ACM output (e.g. `_abc123.api.yourdomain.com`) |
+| Record type | CNAME |
+| Value | The `Value` from ACM output (e.g. `_xyz456.acm-validations.aws`) |
+
+Verify DNS has propagated:
+
+```bash
+dig _<validation-token>.api.yourdomain.com CNAME
+```
+
+Monitor until the certificate is issued:
+
+```bash
+watch -n 30 'aws acm describe-certificate \
+  --certificate-arn <your-cert-arn> \
+  --region us-east-1 \
+  --query Certificate.Status'
+```
+
+### Step 2 — Bootstrap CDK
+
+Run once per AWS account/region. This creates the `CDKToolkit` CloudFormation stack that CDK uses to manage deployments:
+
+```bash
+cd infrastructure/cdk
+
+export CDK_ENV=dev
+export CDK_ACCOUNT=<your-aws-account-id>
+export CDK_APP_IMAGE=placeholder
+export CDK_CERT_ARN=<your-cert-arn>
+export CDK_JWT_SECRET=placeholder
+export JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1
+
+cdk bootstrap aws://<your-aws-account-id>/us-east-1
+```
+
+You should see `✅ Environment aws://<account>/us-east-1 bootstrapped`.
+
+### Step 3 — Create a GitHub Actions IAM user
+
+```bash
+aws iam create-user --user-name github-actions-go-microservice
+
+for POLICY in \
+  AmazonEC2ContainerRegistryFullAccess \
+  AmazonECS_FullAccess \
+  AmazonSSMFullAccess \
+  CloudWatchLogsFullAccess \
+  IAMFullAccess \
+  AmazonVPCFullAccess \
+  ElasticLoadBalancingFullAccess \
+  AWSCloudFormationFullAccess; do
+  aws iam attach-user-policy \
+    --user-name github-actions-go-microservice \
+    --policy-arn arn:aws:iam::aws:policy/$POLICY
+done
+
+# Save the output — you'll need these for GitHub Secrets
+aws iam create-access-key --user-name github-actions-go-microservice
+```
+
+### Step 4 — Add GitHub Secrets
+
+In your repo go to **Settings → Secrets and variables → Actions** and add:
+
+| Secret | Where to get it |
+|---|---|
+| `AWS_ACCESS_KEY_ID` | Output of Step 3 |
+| `AWS_SECRET_ACCESS_KEY` | Output of Step 3 |
+| `AWS_ACCOUNT_ID` | Your 12-digit AWS account ID |
+| `ACM_CERTIFICATE_ARN` | Output of Step 1 |
+| `JWT_SECRET` | Run: `openssl rand -hex 32` |
+
+### Step 5 — Set up GitHub Environments
+
+In your repo go to **Settings → Environments** and create three environments: `dev`, `test`, `prod`.
+
+For `prod`, add **Required reviewers** — this creates a manual approval gate before any prod deployment or teardown can proceed.
+
+### Step 6 — Update environment config files
+
+Edit `infrastructure/cdk/environments/dev.env`, `test.env`, and `prod.env` and fill in your values:
+
+```bash
+# Uncomment and fill in:
+# export CDK_ACCOUNT=<your-aws-account-id>
+# export CDK_CERT_ARN=arn:aws:acm:us-east-1:<account>:certificate/...
+```
+
+### Step 7 — First deploy
+
+Push to `main` — the pipeline runs automatically:
+
+```
+unit tests → integration tests → build image → dev → test → prod (approval)
+```
+
+Or deploy manually:
+
+```bash
+cd infrastructure/cdk
+source environments/prod.env
+
+export CDK_APP_IMAGE=<ecr-url>:<tag>
+export CDK_JWT_SECRET=$(openssl rand -hex 32)
+export JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1
+
+cdk deploy GoMicroservice-Prod --require-approval never
+```
+
+### Step 8 — Add the API subdomain to Route 53
+
+After deploying, get the ALB DNS name from the CDK outputs:
+
+```bash
+aws cloudformation describe-stacks \
+  --stack-name GoMicroservice-Prod \
+  --region us-east-1 \
+  --query "Stacks[0].Outputs[?OutputKey=='ALBDnsName'].OutputValue" \
+  --output text
+```
+
+Then add an Alias A record in Route 53:
+
+| Field | Value |
+|---|---|
+| Record name | `api.yourdomain.com` |
+| Record type | A |
+| Route traffic to | Alias to ALB |
+| ALB DNS name | Output from above |
+
+### Day-to-day demo workflow
+
+```bash
+# Deploy prod (via GitHub Actions — recommended)
+# Actions → CI/CD Pipeline → Run workflow → deploy-prod
+
+# Run integration tests against live prod
+make aws-test ENV=prod
+
+# Tail CloudWatch logs
+make aws-logs ENV=prod
+
+# Tear down when done (zero cost)
+# Actions → CI/CD Pipeline → Run workflow → destroy-prod
+```
+
+### Cost estimate
+
+| Resource | While running | While destroyed |
+|---|---|---|
+| ECS Fargate (0.5 vCPU, 1GB) | ~$0.02/hr | $0 |
+| ALB | ~$0.02/hr | $0 |
+| ECR image storage | ~$0.01/mo | ~$0.01/mo |
+| CloudWatch logs | ~$0.01/mo | ~$0.01/mo |
+| CDKToolkit assets | ~$0.01/mo | ~$0.01/mo |
+| **Total running** | **~$0.05/hr** | — |
+| **Total destroyed** | — | **~$0.03/mo** |
+
+A 2-hour demo costs roughly **$0.10**.

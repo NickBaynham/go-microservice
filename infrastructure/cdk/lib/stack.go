@@ -3,8 +3,8 @@ package lib
 import (
 	"fmt"
 
+	"github.com/aws/aws-cdk-go/awscdk/v2"
 	"github.com/aws/aws-cdk-go/awscdk/v2/awscertificatemanager"
-	"github.com/aws/aws-cdk-go/awscdk/v2/awscloudwatch"
 	"github.com/aws/aws-cdk-go/awscdk/v2/awsec2"
 	"github.com/aws/aws-cdk-go/awscdk/v2/awsecr"
 	"github.com/aws/aws-cdk-go/awscdk/v2/awsecs"
@@ -13,6 +13,8 @@ import (
 	"github.com/aws/aws-cdk-go/awscdk/v2/awsiam"
 	"github.com/aws/aws-cdk-go/awscdk/v2/awslogs"
 	"github.com/aws/aws-cdk-go/awscdk/v2/awsssm"
+	"github.com/aws/constructs-go/constructs/v10"
+	"github.com/aws/jsii-runtime-go"
 )
 
 // ── Stack Props ───────────────────────────────────────────────────────────────
@@ -211,7 +213,7 @@ func NewGoMicroserviceStack(scope constructs.Construct, id string, props *GoMicr
 			AssignPublicIp:         jsii.Bool(true),
 			Protocol:               awselasticloadbalancingv2.ApplicationProtocol_HTTPS,
 			Certificate:            cert,
-			SslPolicy:              awselasticloadbalancingv2.SslPolicy_TLS13_12,
+			SslPolicy:              awselasticloadbalancingv2.SslPolicy_RECOMMENDED_TLS,
 			TargetProtocol:         awselasticloadbalancingv2.ApplicationProtocol_HTTPS,
 			HealthCheckGracePeriod: awscdk.Duration_Seconds(jsii.Number(120)),
 		},
@@ -234,9 +236,9 @@ func NewGoMicroserviceStack(scope constructs.Construct, id string, props *GoMicr
 		Protocol: awselasticloadbalancingv2.ApplicationProtocol_HTTP,
 		DefaultAction: awselasticloadbalancingv2.ListenerAction_Redirect(
 			&awselasticloadbalancingv2.RedirectOptions{
-				Port:       jsii.String("443"),
-				Protocol:   jsii.String("HTTPS"),
-				StatusCode: awselasticloadbalancingv2.RedirectStatusCode_HTTP_301,
+				Port:      jsii.String("443"),
+				Protocol:  jsii.String("HTTPS"),
+				Permanent: jsii.Bool(true),
 			},
 		),
 	})
@@ -245,74 +247,9 @@ func NewGoMicroserviceStack(scope constructs.Construct, id string, props *GoMicr
 	repo.GrantPull(executionRole)
 
 	// ── CloudWatch Dashboard ──────────────────────────────────────────────────
-
-	awscloudwatch.NewDashboard(stack, jsii.String("Dashboard"), &awscloudwatch.DashboardProps{
-		DashboardName: jsii.String(prefix + "-dashboard"),
-		Widgets: &[][]awscloudwatch.IWidget{
-			{
-				awscloudwatch.NewGraphWidget(&awscloudwatch.GraphWidgetProps{
-					Title: jsii.String("ECS CPU Utilization"),
-					Left: &[]awscloudwatch.IMetric{
-						awscloudwatch.NewMetric(&awscloudwatch.MetricProps{
-							Namespace:  jsii.String("AWS/ECS"),
-							MetricName: jsii.String("CPUUtilization"),
-							DimensionsMap: &map[string]*string{
-								"ClusterName": cluster.ClusterName(),
-								"ServiceName": albService.Service().ServiceName(),
-							},
-							Statistic: jsii.String("Average"),
-							Period:    awscdk.Duration_Minutes(jsii.Number(1)),
-						}),
-					},
-				}),
-				awscloudwatch.NewGraphWidget(&awscloudwatch.GraphWidgetProps{
-					Title: jsii.String("ECS Memory Utilization"),
-					Left: &[]awscloudwatch.IMetric{
-						awscloudwatch.NewMetric(&awscloudwatch.MetricProps{
-							Namespace:  jsii.String("AWS/ECS"),
-							MetricName: jsii.String("MemoryUtilization"),
-							DimensionsMap: &map[string]*string{
-								"ClusterName": cluster.ClusterName(),
-								"ServiceName": albService.Service().ServiceName(),
-							},
-							Statistic: jsii.String("Average"),
-							Period:    awscdk.Duration_Minutes(jsii.Number(1)),
-						}),
-					},
-				}),
-			},
-			{
-				awscloudwatch.NewGraphWidget(&awscloudwatch.GraphWidgetProps{
-					Title: jsii.String("ALB Request Count"),
-					Left: &[]awscloudwatch.IMetric{
-						awscloudwatch.NewMetric(&awscloudwatch.MetricProps{
-							Namespace:  jsii.String("AWS/ApplicationELB"),
-							MetricName: jsii.String("RequestCount"),
-							DimensionsMap: &map[string]*string{
-								"LoadBalancer": albService.LoadBalancer().LoadBalancerFullName(),
-							},
-							Statistic: jsii.String("Sum"),
-							Period:    awscdk.Duration_Minutes(jsii.Number(1)),
-						}),
-					},
-				}),
-				awscloudwatch.NewGraphWidget(&awscloudwatch.GraphWidgetProps{
-					Title: jsii.String("ALB 5xx Errors"),
-					Left: &[]awscloudwatch.IMetric{
-						awscloudwatch.NewMetric(&awscloudwatch.MetricProps{
-							Namespace:  jsii.String("AWS/ApplicationELB"),
-							MetricName: jsii.String("HTTPCode_Target_5XX_Count"),
-							DimensionsMap: &map[string]*string{
-								"LoadBalancer": albService.LoadBalancer().LoadBalancerFullName(),
-							},
-							Statistic: jsii.String("Sum"),
-							Period:    awscdk.Duration_Minutes(jsii.Number(1)),
-						}),
-					},
-				}),
-			},
-		},
-	})
+	// Note: Add dashboard via AWS Console or a separate CDK construct once deployed.
+	// The log groups /ecs/go-microservice-{env}/app and /mongo are created above
+	// and can be used to build a dashboard manually in CloudWatch.
 
 	// ── Outputs ───────────────────────────────────────────────────────────────
 

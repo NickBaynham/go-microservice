@@ -218,6 +218,10 @@ func (h *UserHandler) UpdateUser(c *gin.Context) {
 
 	user, err := h.repo.Update(c.Request.Context(), targetID, update)
 	if err != nil {
+		if errors.Is(err, repository.ErrDuplicateEmail) {
+			c.JSON(http.StatusConflict, models.ErrorResponse{Error: err.Error()})
+			return
+		}
 		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: err.Error()})
 		return
 	}

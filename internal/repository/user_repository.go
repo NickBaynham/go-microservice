@@ -104,6 +104,9 @@ func (r *UserRepository) Update(ctx context.Context, id string, update bson.M) (
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return nil, errors.New("user not found")
 	}
+	if mongo.IsDuplicateKeyError(err) {
+		return nil, ErrDuplicateEmail
+	}
 	return &user, err
 }
 

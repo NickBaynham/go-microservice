@@ -24,6 +24,10 @@ func TestGenerateToken_InvalidExpireHours_ReturnsError(t *testing.T) {
 	if err == nil {
 		t.Fatal("GenerateToken: expected error with invalid expiry")
 	}
+	_, err = auth.GenerateToken("user123", "alice@example.com", "user", testSecret, "9000")
+	if err == nil {
+		t.Fatal("GenerateToken: expected error when expiry > 8760")
+	}
 }
 
 func TestValidateToken_RoundTrip(t *testing.T) {

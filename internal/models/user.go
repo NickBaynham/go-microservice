@@ -24,7 +24,6 @@ type CreateUserRequest struct {
 	Name     string `json:"name"     binding:"required,min=2" example:"Alice Smith"`
 	Email    string `json:"email"    binding:"required,email" example:"alice@example.com"`
 	Password string `json:"password" binding:"required,min=8" example:"securepassword"`
-	Role     string `json:"role"                               example:"user"`
 }
 
 // UpdateUserRequest is the payload for updating a user

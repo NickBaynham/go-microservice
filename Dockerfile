@@ -11,12 +11,13 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o /user-service ./cmd/server
 
-# ---- Runtime stage ----
-FROM --platform=linux/arm64 scratch
+# ---- Runtime stage (Alpine: wget for ECS container health checks) ----
+FROM --platform=linux/arm64 alpine:3.21
+
+RUN apk add --no-cache ca-certificates wget
 
 COPY --from=builder /user-service /user-service
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
-EXPOSE 8443
+EXPOSE 8080 8443
 
 ENTRYPOINT ["/user-service"]

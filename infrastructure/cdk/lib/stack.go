@@ -37,21 +37,11 @@ func NewGoMicroserviceStack(scope constructs.Construct, id string, props *GoMicr
 
 	prefix := fmt.Sprintf("go-microservice-%s", props.Environment)
 
-	// ── ECR Repository ────────────────────────────────────────────────────────
-	// Shared across environments — only created once, looked up by name.
+	// ── ECR Repository (lookup) ───────────────────────────────────────────────
+	// Repository must exist (CI creates it before push). Avoids duplicate repo errors
+	// when deploying dev, test, and prod stacks in the same account.
 
-	repo := awsecr.NewRepository(stack, jsii.String("ECRRepo"), &awsecr.RepositoryProps{
-		RepositoryName:     jsii.String("go-microservice"),
-		ImageScanOnPush:    jsii.Bool(true),
-		ImageTagMutability: awsecr.TagMutability_MUTABLE,
-		LifecycleRules: &[]*awsecr.LifecycleRule{
-			{
-				MaxImageCount: jsii.Number(10),
-				Description:   jsii.String("Keep last 10 images"),
-			},
-		},
-		RemovalPolicy: awscdk.RemovalPolicy_RETAIN, // never delete the registry on destroy
-	})
+	repo := awsecr.Repository_FromRepositoryName(stack, jsii.String("ECRRepo"), jsii.String("go-microservice"))
 
 	// ── VPC ───────────────────────────────────────────────────────────────────
 
@@ -78,6 +68,8 @@ func NewGoMicroserviceStack(scope constructs.Construct, id string, props *GoMicr
 
 	// ── SSM Parameter for JWT Secret ──────────────────────────────────────────
 
+	// Note: plain SSM StringParameter stores the value in CloudFormation; prefer AWS Secrets
+	// Manager for new deployments if you need stronger secret handling.
 	jwtParam := awsssm.NewStringParameter(stack, jsii.String("JWTSecret"), &awsssm.StringParameterProps{
 		ParameterName: jsii.String(fmt.Sprintf("/%s/jwt-secret", prefix)),
 		StringValue:   jsii.String(props.JwtSecret),
@@ -136,12 +128,11 @@ func NewGoMicroserviceStack(scope constructs.Construct, id string, props *GoMicr
 		Environment: &map[string]*string{
 			"PORT":             jsii.String("8080"),
 			"TLS_PORT":         jsii.String("8443"),
+			"LISTEN_HTTP":      jsii.String("true"),
 			"ENV":              jsii.String(props.Environment),
 			"MONGO_URI":        jsii.String("mongodb://localhost:27017"),
 			"MONGO_DB":         jsii.String("userservice"),
 			"JWT_EXPIRE_HOURS": jsii.String("24"),
-			"TLS_CERT":         jsii.String("/app/certs/dev-cert.pem"),
-			"TLS_KEY":          jsii.String("/app/certs/dev-key.pem"),
 		},
 		Secrets: &map[string]awsecs.Secret{
 			"JWT_SECRET": awsecs.Secret_FromSsmParameter(jwtParam),
@@ -153,7 +144,7 @@ func NewGoMicroserviceStack(scope constructs.Construct, id string, props *GoMicr
 		HealthCheck: &awsecs.HealthCheck{
 			Command: &[]*string{
 				jsii.String("CMD-SHELL"),
-				jsii.String("wget -qO- --no-check-certificate https://localhost:8443/health || exit 1"),
+				jsii.String("wget -qO- http://127.0.0.1:8080/health || exit 1"),
 			},
 			Interval:    awscdk.Duration_Seconds(jsii.Number(30)),
 			Timeout:     awscdk.Duration_Seconds(jsii.Number(10)),
@@ -163,7 +154,7 @@ func NewGoMicroserviceStack(scope constructs.Construct, id string, props *GoMicr
 	})
 
 	appContainer.AddPortMappings(&awsecs.PortMapping{
-		ContainerPort: jsii.Number(8443),
+		ContainerPort: jsii.Number(8080),
 		Protocol:      awsecs.Protocol_TCP,
 	})
 
@@ -219,7 +210,7 @@ func NewGoMicroserviceStack(scope constructs.Construct, id string, props *GoMicr
 			Protocol:               awselasticloadbalancingv2.ApplicationProtocol_HTTPS,
 			Certificate:            cert,
 			SslPolicy:              awselasticloadbalancingv2.SslPolicy_RECOMMENDED_TLS,
-			TargetProtocol:         awselasticloadbalancingv2.ApplicationProtocol_HTTPS,
+			TargetProtocol:         awselasticloadbalancingv2.ApplicationProtocol_HTTP,
 			HealthCheckGracePeriod: awscdk.Duration_Seconds(jsii.Number(120)),
 		},
 	)
@@ -227,7 +218,7 @@ func NewGoMicroserviceStack(scope constructs.Construct, id string, props *GoMicr
 	// Configure health check on target group
 	albService.TargetGroup().ConfigureHealthCheck(&awselasticloadbalancingv2.HealthCheck{
 		Path:                    jsii.String("/health"),
-		Protocol:                awselasticloadbalancingv2.Protocol_HTTPS,
+		Protocol:                awselasticloadbalancingv2.Protocol_HTTP,
 		HealthyHttpCodes:        jsii.String("200"),
 		Interval:                awscdk.Duration_Seconds(jsii.Number(30)),
 		Timeout:                 awscdk.Duration_Seconds(jsii.Number(10)),

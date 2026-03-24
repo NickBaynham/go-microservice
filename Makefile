@@ -225,7 +225,7 @@ test-integration-local: check-go
 	 TEST_SKIP_TLS_VERIFY=true \
 	 MONGO_URI=mongodb://localhost:27017 \
 	 MONGO_DB=userservice \
-	 go test ./tests/integration/... -v -count=1 -timeout 60s
+	 go test -tags=integration ./tests/integration/... -v -count=1 -timeout 60s
 	@echo "  ✔ Integration tests passed"
 
 ## test-integration: Run integration tests in isolated Docker environment (pipeline-safe)
@@ -239,7 +239,7 @@ test-integration: check-go certs
 	 TEST_SKIP_TLS_VERIFY=true \
 	 MONGO_URI=mongodb://localhost:27117 \
 	 MONGO_DB=userservice_test \
-	 go test ./tests/integration/... -v -count=1 -timeout 120s; \
+	 go test -tags=integration ./tests/integration/... -v -count=1 -timeout 120s; \
 	 EXIT_CODE=$$?; \
 	 docker compose -f deployments/docker-compose.test.yml down; \
 	 exit $$EXIT_CODE
@@ -326,7 +326,7 @@ aws-test: check-go
 	TEST_PORT=443 \
 	TEST_SCHEME=https \
 	TEST_SKIP_TLS_VERIFY=false \
-	go test ./tests/integration/... -v -count=1 -timeout 120s
+	go test -tags=integration ./tests/integration/... -v -count=1 -timeout 120s
 	@echo "  ✔ Tests passed"
 
 ## aws-logs: Tail CloudWatch logs for an environment

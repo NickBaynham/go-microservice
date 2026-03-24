@@ -15,6 +15,7 @@ func TestIsProd(t *testing.T) {
 		want bool
 	}{
 		{"production", true},
+		{"prod", true},
 		{"development", false},
 		{"test", false},
 		{"", false},

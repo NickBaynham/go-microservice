@@ -39,13 +39,19 @@ import (
 	appTLS "go-microservice/internal/tls"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+	"golang.org/x/time/rate"
 )
 
 func main() {
 	cfg := config.Load()
 
-	// Update swagger host dynamically
-	docs.SwaggerInfo.Host = "localhost:" + cfg.TLSPort
+	if cfg.ServeHTTPOnly() {
+		docs.SwaggerInfo.Host = "localhost:" + cfg.Port
+		docs.SwaggerInfo.Schemes = []string{"http"}
+	} else {
+		docs.SwaggerInfo.Host = "localhost:" + cfg.TLSPort
+		docs.SwaggerInfo.Schemes = []string{"https"}
+	}
 
 	// Connect to MongoDB
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -74,18 +80,20 @@ func main() {
 	r.SetTrustedProxies(nil) //nolint:errcheck
 
 	// Swagger UI (disable in production)
-	if cfg.Env != "production" {
+	if !cfg.IsProduction() {
 		r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerfiles.Handler))
 		r.GET("/", func(c *gin.Context) {
-			c.Redirect(http.StatusMovedPermanently, "/swagger/index.html")
+			c.Redirect(http.StatusMovedPermanently, "https://localhost:"+cfg.TLSPort+"/swagger/index.html")
 		})
-		log.Printf("Swagger UI available at https://localhost:%s/swagger/index.html", cfg.TLSPort)
+		log.Printf("Swagger UI at https://localhost:%s/swagger/index.html (adjust scheme/port if using TLS offloading)", cfg.TLSPort)
 	}
 
 	// Public routes
 	r.GET("/health", healthHandler.Health)
-	r.POST("/auth/register", userHandler.Register)
-	r.POST("/auth/login", userHandler.Login)
+
+	authLimit := middleware.PerIPRateLimit(rate.Every(2*time.Second), 15)
+	r.POST("/auth/register", authLimit, userHandler.Register)
+	r.POST("/auth/login", authLimit, userHandler.Login)
 
 	// Protected routes
 	protected := r.Group("/")
@@ -104,43 +112,40 @@ func main() {
 		}
 	}
 
-	// Build TLS config
-	tlsCfg := appTLS.MustGetTLSConfig(&appTLS.Config{
-		CertFile: cfg.TLSCert,
-		KeyFile:  cfg.TLSKey,
-		Env:      cfg.Env,
-	})
+	var srv *http.Server
 
-	httpsPort := cfg.TLSPort
-	srv := &http.Server{
-		Addr:      ":" + httpsPort,
-		Handler:   r,
-		TLSConfig: tlsCfg,
-	}
-
-	// In production also spin up an HTTP server that redirects to HTTPS
-	if cfg.Env == "production" {
+	if cfg.ServeHTTPOnly() {
+		addr := ":" + cfg.Port
+		srv = &http.Server{
+			Addr:    addr,
+			Handler: r,
+		}
 		go func() {
-			redirectSrv := &http.Server{
-				Addr: ":80",
-				Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					http.Redirect(w, r, "https://"+r.Host+r.RequestURI, http.StatusMovedPermanently)
-				}),
+			log.Printf("HTTP server starting on %s (env=%s, TLS at reverse proxy)", addr, cfg.Env)
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("listen: %v", err)
 			}
-			log.Println("HTTP redirect server listening on :80")
-			if err := redirectSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Printf("HTTP redirect server error: %v", err)
+		}()
+	} else {
+		tlsCfg := appTLS.MustGetTLSConfig(&appTLS.Config{
+			CertFile: cfg.TLSCert,
+			KeyFile:  cfg.TLSKey,
+			Env:      cfg.Env,
+		})
+
+		httpsPort := cfg.TLSPort
+		srv = &http.Server{
+			Addr:      ":" + httpsPort,
+			Handler:   r,
+			TLSConfig: tlsCfg,
+		}
+		go func() {
+			log.Printf("HTTPS server starting on port %s (env=%s)", httpsPort, cfg.Env)
+			if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("listen: %v", err)
 			}
 		}()
 	}
-
-	// Graceful shutdown
-	go func() {
-		log.Printf("HTTPS server starting on port %s (env=%s)", httpsPort, cfg.Env)
-		if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("listen: %v", err)
-		}
-	}()
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)

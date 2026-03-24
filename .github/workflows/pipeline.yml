@@ -73,7 +73,7 @@ jobs:
           TEST_SKIP_TLS_VERIFY=true \
           MONGO_URI=mongodb://localhost:27117 \
           MONGO_DB=userservice_test \
-          go test ./tests/integration/... -v -count=1 -timeout 120s
+          go test -tags=integration ./tests/integration/... -v -count=1 -timeout 120s
       - name: Print container logs on failure
         if: failure()
         run: docker compose -f deployments/docker-compose.test.yml logs
@@ -105,6 +105,11 @@ jobs:
       - name: Login to ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
+      - name: Ensure ECR repository exists
+        run: |
+          aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" --region "$AWS_REGION" \
+            || aws ecr create-repository --repository-name "$ECR_REPOSITORY" --region "$AWS_REGION" \
+                 --image-scanning-configuration scanOnPush=true
       - name: Set image tag
         id: meta
         run: echo "tag=$(echo ${{ github.sha }} | head -c7)" >> $GITHUB_OUTPUT
@@ -135,7 +140,7 @@ jobs:
         with:
           go-version: '1.26'
           cache: true
-      - uses: actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -168,7 +173,7 @@ jobs:
         run: |
           ALB=$(cat $CDK_DIR/outputs.json | python3 -c "import sys,json; d=json.load(sys.stdin); print(list(d.values())[0]['ALBDnsName'])")
           TEST_HOST=$ALB TEST_PORT=443 TEST_SCHEME=https TEST_SKIP_TLS_VERIFY=false \
-          go test ./tests/integration/... -v -count=1 -run "TestAPI/GET_/health" -timeout 30s
+          go test -tags=integration ./tests/integration/... -v -count=1 -run "TestAPI/GET_/health" -timeout 30s
       - name: CDK destroy (dev)
         if: always()
         env:
@@ -228,7 +233,7 @@ jobs:
         run: |
           ALB=$(cat $CDK_DIR/outputs.json | python3 -c "import sys,json; d=json.load(sys.stdin); print(list(d.values())[0]['ALBDnsName'])")
           TEST_HOST=$ALB TEST_PORT=443 TEST_SCHEME=https TEST_SKIP_TLS_VERIFY=false \
-          go test ./tests/integration/... -v -count=1 -timeout 120s
+          go test -tags=integration ./tests/integration/... -v -count=1 -timeout 120s
       - name: CDK destroy (test)
         if: always()
         env:

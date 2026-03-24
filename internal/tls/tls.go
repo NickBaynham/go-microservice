@@ -13,6 +13,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -28,9 +29,14 @@ type Config struct {
 	Env string
 }
 
-// IsProd returns true when running in production mode
+// IsProd returns true when running in production mode (docker-compose or CDK prod).
 func (c *Config) IsProd() bool {
-	return c.Env == "production"
+	switch strings.ToLower(strings.TrimSpace(c.Env)) {
+	case "production", "prod":
+		return true
+	default:
+		return false
+	}
 }
 
 // MustGetTLSConfig returns a *tls.Config ready to use with http.Server.

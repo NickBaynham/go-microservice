@@ -12,6 +12,7 @@ services:
     environment:
       MONGO_URI: mongodb://mongo:27017
       ENV: production
+      PORT: "8080"
     depends_on:
       mongo:
         condition: service_healthy

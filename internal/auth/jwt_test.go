@@ -19,14 +19,10 @@ func TestGenerateToken_ValidClaims(t *testing.T) {
 	}
 }
 
-func TestGenerateToken_InvalidExpireHoursFallsBackTo24(t *testing.T) {
-	// Should not error — falls back to 24h
-	token, err := auth.GenerateToken("user123", "alice@example.com", "user", testSecret, "not-a-number")
-	if err != nil {
-		t.Fatalf("GenerateToken: unexpected error with invalid expiry: %v", err)
-	}
-	if token == "" {
-		t.Fatal("GenerateToken: expected non-empty token")
+func TestGenerateToken_InvalidExpireHours_ReturnsError(t *testing.T) {
+	_, err := auth.GenerateToken("user123", "alice@example.com", "user", testSecret, "not-a-number")
+	if err == nil {
+		t.Fatal("GenerateToken: expected error with invalid expiry")
 	}
 }
 

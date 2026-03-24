@@ -1,3 +1,5 @@
+//go:build integration
+
 // Package integration contains end-to-end tests for the go-microservice API.
 //
 // Tests run against a live server (local or Docker). Configure via environment:
@@ -140,7 +142,6 @@ func TestAPI(t *testing.T) {
 			"name":     adminName,
 			"email":    adminEmail,
 			"password": adminPass,
-			"role":     "admin",
 		})
 
 		assertStatus(t, r.StatusCode, http.StatusCreated, r)

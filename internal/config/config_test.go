@@ -40,6 +40,20 @@ func TestLoad_Defaults(t *testing.T) {
 	}
 }
 
+func TestLoad_InvalidJWTExpireHours_DevelopmentFallsBackTo24(t *testing.T) {
+	unset := []string{"PORT", "TLS_PORT", "MONGO_URI", "MONGO_DB", "JWT_SECRET", "JWT_EXPIRE_HOURS", "ENV", "TLS_CERT", "TLS_KEY"}
+	for _, k := range unset {
+		os.Unsetenv(k)
+	}
+	os.Setenv("JWT_EXPIRE_HOURS", "not-valid")
+	defer os.Unsetenv("JWT_EXPIRE_HOURS")
+
+	cfg := config.Load()
+	if cfg.JWTExpireHours != "24" {
+		t.Errorf("JWTExpireHours: got %q, want 24", cfg.JWTExpireHours)
+	}
+}
+
 func TestLoad_OverridesFromEnv(t *testing.T) {
 	os.Setenv("PORT", "9090")
 	os.Setenv("TLS_PORT", "9443")

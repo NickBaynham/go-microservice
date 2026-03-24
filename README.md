@@ -12,7 +12,7 @@ go-microservice/
 │   ├── auth/            # JWT helpers
 │   ├── config/          # Environment config
 │   ├── handlers/        # HTTP handlers
-│   ├── middleware/       # Auth & role middleware
+│   ├── middleware/      # Auth, roles, rate limiting
 │   ├── models/          # Request/response models
 │   └── repository/      # MongoDB data layer
 ├── certs/               # Dev/test self-signed certs (git-ignored)
@@ -32,8 +32,8 @@ go-microservice/
 | Method | Path              | Description          |
 |--------|-------------------|----------------------|
 | GET    | /health           | Health check         |
-| POST   | /auth/register    | Register a new user  |
-| POST   | /auth/login       | Login & get JWT      |
+| POST   | /auth/register    | Register (first user becomes **admin**, rest are **user**; rate-limited) |
+| POST   | /auth/login       | Login & get JWT (rate-limited) |
 
 ### Protected (JWT required)
 | Method | Path         | Description             |
@@ -134,15 +134,18 @@ curl -k https://localhost:8443/health
 
 | Variable         | Default                   | Description                                      |
 |------------------|---------------------------|--------------------------------------------------|
-| PORT             | 8080                      | Internal HTTP port                               |
-| TLS_PORT         | 8443                      | HTTPS port (dev/test)                            |
-| ENV              | development               | `development`, `test`, or `production`           |
+| PORT             | 8080                      | HTTP listen port when TLS is offloaded (Compose prod, ECS) |
+| TLS_PORT         | 8443                      | HTTPS port when the app serves TLS (dev / local Docker) |
+| LISTEN_HTTP      | _(unset)_                 | If `true` / `1` / `yes`, listen on **PORT** with plain HTTP (used on ECS; TLS at ALB) |
+| ENV              | development               | `development`, `test`, `production`, or CDK `dev` / `test` / `prod` |
 | MONGO_URI        | mongodb://localhost:27017 | MongoDB connection URI                           |
 | MONGO_DB         | userservice               | Database name                                    |
-| JWT_SECRET       | change-me-in-production   | JWT signing secret                               |
-| JWT_EXPIRE_HOURS | 24                        | Token expiry in hours                            |
-| TLS_CERT         | _(auto in dev)_           | Path to cert PEM (required in production)        |
-| TLS_KEY          | _(auto in dev)_           | Path to key PEM (required in production)         |
+| JWT_SECRET       | change-me-in-production   | JWT signing secret; for **`production` or `prod`**, must be **≥ 32 characters** and not the default |
+| JWT_EXPIRE_HOURS | 24                        | Token expiry in hours (**0–8760**; invalid values fall back to 24 outside prod) |
+| TLS_CERT         | _(empty)_                 | Cert PEM path; empty + `production`/`prod` ⇒ HTTP on PORT (proxy terminates TLS) |
+| TLS_KEY          | _(empty)_                 | Key PEM path; same as TLS_CERT                   |
+
+Registration ignores any client-supplied role: the **first** account in the database is **`admin`**, every later signup is **`user`**.
 
 ## TLS / SSL
 
@@ -187,13 +190,14 @@ Certbot runs as a sidecar container and **auto-renews** the certificate every 12
 
 ### How it works
 
-| Environment | TLS handled by | Certificate |
-|---|---|---|
-| `development` | Go directly | Self-signed (auto-generated) |
-| `test` | Go directly | Self-signed (auto-generated) |
-| `production` | Nginx reverse proxy | Let's Encrypt (certbot) |
+| Environment | TLS handled by | App listens | Certificate |
+|---|---|---|---|
+| `development` | Go directly | HTTPS on **TLS_PORT** (e.g. 8443) | Self-signed (auto-generated) |
+| `test` | Go directly | HTTPS on **TLS_PORT** | Self-signed (mounted or generated) |
+| `production` (Docker Compose) | Nginx | HTTP on **PORT** (8080) | Let's Encrypt (certbot) |
+| `dev` / `test` / `prod` (ECS + ALB) | Application Load Balancer | HTTP on **PORT** (8080); `LISTEN_HTTP=true` | ACM cert on ALB |
 
-In production, Nginx terminates SSL on port 443 and proxies plain HTTP to the Go app internally on port 8080 — so your Go code never changes between environments.
+In production-style deployments, TLS terminates at **Nginx** or the **ALB**; the Go process serves **plain HTTP** on port 8080 inside the network.
 
 ## Swagger / API Documentation
 
@@ -213,7 +217,7 @@ https://localhost:8443/swagger/index.html
 
 You can authorize with a JWT directly in the UI — click the **Authorize** button and enter `Bearer <your_token>`.
 
-> Swagger UI is automatically **disabled in production** (`ENV=production`).
+> Swagger UI is automatically **disabled** when `ENV` is **`production`** or **`prod`** (including CDK).
 
 ### Regenerate after changes
 
@@ -229,13 +233,15 @@ Or it runs automatically as part of `make run` and `make build`.
 
 The test suite covers every endpoint — status codes, response keys/values, auth rules, and error cases. The database is cleaned before and after each run so tests are fully isolated and repeatable.
 
+**Integration tests** live behind the Go build tag **`integration`**. `make test`, `make test-integration`, and `make test-integration-local` pass that tag for you. Plain `go test ./...` runs **unit tests only** (no live server required).
+
 ### Run all tests (pipeline-safe)
 
 ```bash
 make test
 ```
 
-This runs unit tests, then spins up a dedicated Docker environment (separate DB on port 9443), runs the integration tests, then tears everything down. Safe to run in CI pipelines.
+This runs unit tests, then spins up a dedicated Docker environment (separate DB on port 9443), runs the integration tests (`-tags=integration`), then tears everything down. Safe to run in CI pipelines.
 
 ### Run integration tests against your local server
 
@@ -290,10 +296,12 @@ This service deploys to AWS ECS Fargate via AWS CDK. The infrastructure is defin
 ### Architecture
 
 ```
-Internet → ALB (HTTPS/443) → ECS Fargate Task
+Internet → ALB (HTTPS/443) → ECS Fargate Task (app :8080 HTTP, TLS only on ALB)
                                  ├── app container  (go-microservice)
                                  └── mongo container (MongoDB sidecar)
 ```
+
+The shared **ECR** repository `go-microservice` is **looked up** by CDK (not created per stack). CI creates the repository before the first image push if it does not exist.
 
 All infrastructure is created and destroyed on demand — you pay only when the service is running (~$0.05/hr). See the cost breakdown at the end of this section.
 

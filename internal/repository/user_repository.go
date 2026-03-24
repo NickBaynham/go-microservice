@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"log"
 	"time"
 
 	"go-microservice/internal/models"
@@ -11,6 +12,9 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
+
+// ErrDuplicateEmail is returned when inserting a user whose email already exists.
+var ErrDuplicateEmail = errors.New("email already exists")
 
 type UserRepository struct {
 	col *mongo.Collection
@@ -26,9 +30,16 @@ func NewUserRepository(db *mongo.Database) *UserRepository {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	col.Indexes().CreateOne(ctx, idx) //nolint:errcheck
+	if _, err := col.Indexes().CreateOne(ctx, idx); err != nil {
+		log.Printf("user repository: failed to ensure unique email index: %v", err)
+	}
 
 	return &UserRepository{col: col}
+}
+
+// Count returns the number of users in the collection.
+func (r *UserRepository) Count(ctx context.Context) (int64, error) {
+	return r.col.CountDocuments(ctx, bson.M{})
 }
 
 func (r *UserRepository) Create(ctx context.Context, user *models.User) error {
@@ -40,7 +51,7 @@ func (r *UserRepository) Create(ctx context.Context, user *models.User) error {
 	}
 	_, err := r.col.InsertOne(ctx, user)
 	if mongo.IsDuplicateKeyError(err) {
-		return errors.New("email already exists")
+		return ErrDuplicateEmail
 	}
 	return err
 }

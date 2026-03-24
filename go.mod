@@ -1,6 +1,6 @@
 module go-microservice
 
-go 1.25.0
+go 1.26
 
 require (
 	github.com/gin-gonic/gin v1.12.0
@@ -11,6 +11,7 @@ require (
 	github.com/swaggo/swag v1.16.3
 	go.mongodb.org/mongo-driver v1.17.9
 	golang.org/x/crypto v0.49.0
+	golang.org/x/time v0.14.0
 )
 
 require (

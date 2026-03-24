@@ -17,8 +17,8 @@ type Claims struct {
 
 func GenerateToken(userID, email, role, secret, expireHours string) (string, error) {
 	hours, err := strconv.Atoi(expireHours)
-	if err != nil {
-		hours = 24
+	if err != nil || hours < 0 || hours > 8760 {
+		return "", errors.New("invalid JWT expiry hours")
 	}
 
 	claims := &Claims{

@@ -45,7 +45,7 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 	os.Setenv("TLS_PORT", "9443")
 	os.Setenv("MONGO_URI", "mongodb://mongo:27017")
 	os.Setenv("MONGO_DB", "testdb")
-	os.Setenv("JWT_SECRET", "my-secret")
+	os.Setenv("JWT_SECRET", "my-production-jwt-secret-at-least-32-chars!!")
 	os.Setenv("JWT_EXPIRE_HOURS", "48")
 	os.Setenv("ENV", "production")
 	os.Setenv("TLS_CERT", "/certs/cert.pem")
@@ -67,7 +67,7 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 		{"TLSPort", cfg.TLSPort, "9443"},
 		{"MongoURI", cfg.MongoURI, "mongodb://mongo:27017"},
 		{"MongoDB", cfg.MongoDB, "testdb"},
-		{"JWTSecret", cfg.JWTSecret, "my-secret"},
+		{"JWTSecret", cfg.JWTSecret, "my-production-jwt-secret-at-least-32-chars!!"},
 		{"JWTExpireHours", cfg.JWTExpireHours, "48"},
 		{"Env", cfg.Env, "production"},
 		{"TLSCert", cfg.TLSCert, "/certs/cert.pem"},

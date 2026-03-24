@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"context"
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -12,18 +14,28 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+type userStore interface {
+	Count(ctx context.Context) (int64, error)
+	Create(ctx context.Context, user *models.User) error
+	FindByEmail(ctx context.Context, email string) (*models.User, error)
+	FindAll(ctx context.Context) ([]models.User, error)
+	FindByID(ctx context.Context, id string) (*models.User, error)
+	Update(ctx context.Context, id string, update bson.M) (*models.User, error)
+	Delete(ctx context.Context, id string) error
+}
+
 type UserHandler struct {
-	repo *repository.UserRepository
+	repo userStore
 	cfg  *config.Config
 }
 
-func NewUserHandler(repo *repository.UserRepository, cfg *config.Config) *UserHandler {
+func NewUserHandler(repo userStore, cfg *config.Config) *UserHandler {
 	return &UserHandler{repo: repo, cfg: cfg}
 }
 
 // Register godoc
 // @Summary      Register a new user
-// @Description  Creates a new user account. The role defaults to "user" if not provided.
+// @Description  Creates a new user account. The first user in the database becomes "admin"; everyone else is "user". Client-supplied roles are ignored.
 // @Tags         auth
 // @Accept       json
 // @Produce      json
@@ -46,15 +58,30 @@ func (h *UserHandler) Register(c *gin.Context) {
 		return
 	}
 
+	count, err := h.repo.Count(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to check user count"})
+		return
+	}
+
+	role := "user"
+	if count == 0 {
+		role = "admin"
+	}
+
 	user := &models.User{
 		Name:     req.Name,
 		Email:    req.Email,
 		Password: string(hashed),
-		Role:     req.Role,
+		Role:     role,
 	}
 
 	if err := h.repo.Create(c.Request.Context(), user); err != nil {
-		c.JSON(http.StatusConflict, models.ErrorResponse{Error: err.Error()})
+		if errors.Is(err, repository.ErrDuplicateEmail) {
+			c.JSON(http.StatusConflict, models.ErrorResponse{Error: err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to create user"})
 		return
 	}
 

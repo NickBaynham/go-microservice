@@ -76,7 +76,7 @@ const docTemplate = `{
         },
         "/auth/register": {
             "post": {
-                "description": "Creates a new user account. The role defaults to \"user\" if not provided.",
+                "description": "Creates a new user account. The first user in the database becomes \"admin\"; everyone else is \"user\". Client-supplied roles are ignored.",
                 "consumes": [
                     "application/json"
                 ],
@@ -432,10 +432,6 @@ const docTemplate = `{
                     "type": "string",
                     "minLength": 8,
                     "example": "securepassword"
-                },
-                "role": {
-                    "type": "string",
-                    "example": "user"
                 }
             }
         },

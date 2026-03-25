@@ -94,7 +94,7 @@ func NewGoMicroserviceStack(scope constructs.Construct, id string, props *GoMicr
 
 	// ── Task Definition ───────────────────────────────────────────────────────
 	// App container + MongoDB sidecar in same task (share localhost network).
-	// Running on Graviton (arm64) — cheaper than x86 and native for Apple Silicon builds.
+	// linux/amd64 image (matches GitHub Actions docker build and avoids QEMU on CI).
 
 	taskDef := awsecs.NewFargateTaskDefinition(stack, jsii.String("TaskDef"), &awsecs.FargateTaskDefinitionProps{
 		Family:         jsii.String(prefix + "-task"),
@@ -102,7 +102,7 @@ func NewGoMicroserviceStack(scope constructs.Construct, id string, props *GoMicr
 		MemoryLimitMiB: jsii.Number(props.TaskMemory),
 		ExecutionRole:  executionRole,
 		RuntimePlatform: &awsecs.RuntimePlatform{
-			CpuArchitecture:       awsecs.CpuArchitecture_ARM64(),
+			CpuArchitecture:       awsecs.CpuArchitecture_X86_64(),
 			OperatingSystemFamily: awsecs.OperatingSystemFamily_LINUX(),
 		},
 	})

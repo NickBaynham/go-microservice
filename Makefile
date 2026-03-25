@@ -2,7 +2,7 @@
         docker-up docker-down docker-prod-up docker-prod-down \
         docker-test-up docker-test-down \
         certs certs-trust certs-check certs-clean \
-        test test-unit test-integration test-integration-local docs lint route53-alias
+        test test-unit test-integration test-integration-local docs lint route53-alias route53-alias-delete
 
 GOMIN        := 1.22
 GOROOT_BREW  := $(shell brew --prefix go 2>/dev/null)/bin/go
@@ -301,6 +301,22 @@ route53-alias:
 	  *) echo "ENV must be dev, test, or prod"; exit 1;; \
 	esac; \
 	bash $(CDK_DIR)/scripts/upsert-route53-alb-alias.sh "$(DNS_ZONE)" "$$_LABEL" "$$_STACK" "$(AWS_REGION)"
+
+## route53-alias-delete: Remove alias A record for ENV (dev-api / test-api / api)
+## Usage: make route53-alias-delete ENV=prod
+## Set DOMAIN in .env or DNS_ZONE=… (same as route53-alias)
+route53-alias-delete:
+	@if [ -z "$(DNS_ZONE)" ]; then \
+	  echo "Set DOMAIN=yourdomain.com in .env (or DNS_ZONE=... on the command line)"; \
+	  exit 1; \
+	fi
+	@case "$(ENV)" in \
+	  dev)  _LABEL=dev-api;; \
+	  test) _LABEL=test-api;; \
+	  prod) _LABEL=api;; \
+	  *) echo "ENV must be dev, test, or prod"; exit 1;; \
+	esac; \
+	bash $(CDK_DIR)/scripts/delete-route53-alb-alias.sh "$(DNS_ZONE)" "$$_LABEL"
 
 ## cdk-install: Install the AWS CDK CLI
 cdk-install:

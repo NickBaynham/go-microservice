@@ -78,16 +78,20 @@ Go to **Settings → Secrets and variables → Actions** and add:
 
 Go to **Settings → Environments** and create three environments: `dev`, `test`, `prod`.
 
-For `prod`, add **Required reviewers** — this gates both prod deployments and prod teardowns.
+Add **Required reviewers** on **`dev`**, **`test`**, and **`prod`** as needed for approval gates before each deploy.
 
 ---
 
-## Step 6 — Push to main
+## Step 6 — Run the CD pipeline (manual)
 
-The pipeline triggers automatically on every push to `main`:
+Nothing deploys to AWS on merge to `main`. **Pull requests** run unit + integration tests only. To build the image and deploy:
+
+1. **Actions** → **CI/CD Pipeline** → **Run workflow**
+2. Select branch **`main`**
+3. Choose whether to deploy to **prod** after test (`deploy_to_prod`: **no** or **yes**)
 
 ```
-unit tests → integration tests → build image → dev (smoke) → test (full) → prod (manual approval)
+unit tests → integration tests → build image → dev → test → (optional) prod
 ```
 
 ---
@@ -95,8 +99,8 @@ unit tests → integration tests → build image → dev (smoke) → test (full)
 ## Day-to-day demo workflow
 
 ```bash
-# Deploy prod via GitHub Actions (recommended):
-# Actions → CI/CD Pipeline → Run workflow → deploy-prod
+# Deploy via GitHub Actions (manual — branch main):
+# Actions → CI/CD Pipeline → Run workflow
 
 # Or deploy locally:
 make aws-up ENV=prod \
@@ -112,7 +116,7 @@ make aws-test ENV=prod
 make aws-logs ENV=prod
 
 # Tear down when done (zero cost):
-# Actions → CI/CD Pipeline → Run workflow → destroy-prod
+# Actions → Teardown stack → choose prod
 
 # Or locally:
 make aws-down ENV=prod APP_IMAGE=... AWS_ACCOUNT_ID=... ACM_CERT_ARN=... JWT_SECRET=...

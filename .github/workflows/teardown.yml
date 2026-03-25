@@ -19,6 +19,8 @@ env:
   AWS_REGION:     us-east-1
   ECR_REPOSITORY: go-microservice
   CDK_DIR:        infrastructure/cdk
+  # Apex zone for Route 53 (match repo Variable DOMAIN or workflow default)
+  DOMAIN: ${{ vars.DOMAIN || 'calgentik.com' }}
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -37,6 +39,10 @@ jobs:
         env:
           EXPECTED_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
         run: bash infrastructure/cdk/scripts/verify-cdk-bootstrap-iam.sh
+      - name: Remove Route 53 alias
+        env:
+          DNS_ZONE: ${{ env.DOMAIN }}
+        run: make route53-alias-delete ENV=${{ inputs.environment }}
       - name: Install AWS CDK
         run: npm install -g aws-cdk
       - name: Install CDK Go dependencies

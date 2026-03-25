@@ -491,7 +491,7 @@ In your repo go to **Settings → Secrets and variables → Actions** and add:
 
 In your repo go to **Settings → Environments** and create three environments: `dev`, `test`, `prod`.
 
-For `prod`, add **Required reviewers** — this creates a manual approval gate before any prod deployment or teardown can proceed.
+Add **Required reviewers** on **`dev`**, **`test`**, and **`prod`** if you want an approval gate before each deploy (recommended). Prod teardown via **Teardown stack** also respects the **`prod`** environment rules.
 
 ### Step 6 — Update environment config files
 
@@ -503,15 +503,21 @@ Edit `infrastructure/cdk/environments/dev.env`, `test.env`, and `prod.env` and f
 # export CDK_CERT_ARN=arn:aws:acm:us-east-1:<account>:certificate/...
 ```
 
-### Step 7 — First deploy
+### Step 7 — First deploy (manual workflow)
 
-Push to `main` — the pipeline runs automatically:
+CDK deploy **does not** run on merge to `main` (no automatic ECR build or deploy). Run it when you want:
+
+1. **Actions** → **CI/CD Pipeline** → **Run workflow**
+2. Branch: **`main`**
+3. **Deploy to prod after test:** **`no`** for dev/test only, or **`yes`** to continue to prod after the test deploy (prod still needs **prod** environment approval if configured)
 
 ```
-unit tests → integration tests → build image → dev → [approve "test" env] → test → [approve "prod" env] → prod
+unit tests → integration tests → build & push ECR → [approve "dev"] → dev → [approve "test"] → test → (optional) [approve "prod"] → prod
 ```
 
-Configure **Settings → Environments** in GitHub: add **required reviewers** on **`test`** (gate before the test deploy job) and **`prod`** (gate before prod deploy). Leave **`dev`** without reviewers if you want dev to deploy automatically after build. **Dev and test stacks are left running** after smoke tests by default (no extra variables). To **auto-destroy** after a job, set repository **Variables** **`DESTROY_DEV_AFTER_DEPLOY`** or **`DESTROY_TEST_AFTER_DEPLOY`** to **`true`**. Tear down manually via **Actions → Teardown stack** when you are done.
+Configure **Settings → Environments** with **required reviewers** on **`dev`**, **`test`**, and **`prod`** as you prefer. **Dev and test stacks are left running** after smoke tests by default (no extra variables). To **auto-destroy** after a job, set repository **Variables** **`DESTROY_DEV_AFTER_DEPLOY`** or **`DESTROY_TEST_AFTER_DEPLOY`** to **`true`**. Tear down manually via **Actions → Teardown stack** when you are done.
+
+**Pull requests** to `main` still run **unit** and **integration** tests only (no AWS build/deploy).
 
 Or deploy manually:
 
@@ -583,13 +589,15 @@ cd infrastructure/cdk/scripts
 
 **Domain name (single source of truth):** set **`DOMAIN`** to your zone apex in **`.env`** (see **`.env.example`**) for local **`make route53-alias`**. For CI, set the same value as a **repository Variable** **`DOMAIN`** under **Settings → Secrets and variables → Actions → Variables** (the workflow defaults to `calgentik.com` if unset).
 
+**Remove an alias** (e.g. before or after tearing down a stack): `make route53-alias-delete ENV=prod` (uses labels **`dev-api`**, **`test-api`**, **`api`** for dev / test / prod). The **Teardown stack** workflow runs this automatically **before** `cdk destroy`. The **CI/CD Pipeline** **`deploy-prod`** job runs **`make route53-alias ENV=prod`** after a successful prod deploy so **`api.${DOMAIN}`** points at the prod ALB. Your IAM user/role for GitHub Actions needs Route 53 permissions to list zones and change records.
+
 The **dev** and **test** jobs in GitHub Actions run **`TestAPISmoke`** (HTTP `/health` only) against the stack’s **ALB DNS name** from CDK outputs (with TLS verification skipped for that hostname). The full **`TestAPI`** suite needs a **`MONGO_URI` reachable from the test process** (Docker integration job uses a local Mongo); ECS Mongo runs only inside the task, so the GitHub Actions runner cannot run the full suite against a deployed stack without a separate DB endpoint (e.g. Atlas) or a runner in your VPC. **Route 53** aliases such as **`dev-api.${DOMAIN}`** / **`test-api.${DOMAIN}`** are optional in CI until you want hostname-based checks; create them with **`make route53-alias`** after the stack exists. **Prod** is typically **`api.${DOMAIN}`**. **Dev** / **test** / **prod** are separate stacks (separate ALBs). Public hostnames need a **Route 53** alias to that stack’s ALB and **ACM** coverage for strict TLS.
 
 ### Day-to-day demo workflow
 
 ```bash
-# Deploy prod (via GitHub Actions — recommended)
-# Actions → CI/CD Pipeline → Run workflow → deploy-prod
+# Deploy via GitHub Actions (manual — branch main, set "Deploy to prod" if needed)
+# Actions → CI/CD Pipeline → Run workflow
 
 # Run integration tests against live prod
 make aws-test ENV=prod

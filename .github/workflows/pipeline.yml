@@ -1,17 +1,15 @@
 name: CI/CD Pipeline
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
     inputs:
-      action:
-        description: 'Manual prod deploy (requires prod environment approval if configured)'
-        required: true
+      deploy_to_prod:
+        description: 'After dev + test deploys, also deploy prod (requires prod environment approval if configured)'
         type: choice
-        options: [deploy-prod]
+        options: ['no', 'yes']
+        default: 'no'
 
 env:
   AWS_REGION:     us-east-1
@@ -29,6 +27,7 @@ jobs:
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -47,6 +46,7 @@ jobs:
     name: Integration Tests
     runs-on: ubuntu-latest
     needs: unit-tests
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -92,7 +92,8 @@ jobs:
     name: Build & Push Image
     runs-on: ubuntu-latest
     needs: integration-tests
-    if: github.ref == 'refs/heads/main' && github.event_name != 'workflow_dispatch'
+    # ECR push only when you manually run this workflow on main (not on merge; avoids cost on every commit)
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     outputs:
       image_tag: ${{ steps.meta.outputs.tag }}
       ecr_url:   ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
@@ -140,6 +141,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     environment: dev
+    # Enable required reviewers on GitHub Environment "dev" to approve before dev deploy (after build).
     # Smoke uses ALB DNS from CDK outputs (skip TLS verify; cert is for your domain, not *.elb.amazonaws.com). Add Route 53 + dev-api.{DOMAIN} later for hostname-based checks.
     # Next job (deploy-test) uses environment "test" — enable required reviewers on that environment to gate dev → test.
     steps:
@@ -276,9 +278,7 @@ jobs:
     needs: [build, deploy-test]
     environment: prod
     # Required reviewers on Environment "prod" = manual approval before deploy (after test succeeds).
-    if: |
-      (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'deploy-prod')
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.event.inputs.deploy_to_prod == 'yes'
     steps:
       - uses: actions/checkout@v6
       - uses: aws-actions/configure-aws-credentials@8df5847569e6427dd6c4fb1cf565c83acfa8afa7 # v6.0.0 (Node 24)
@@ -311,3 +311,7 @@ jobs:
           ALB=$(cat outputs.json | python3 -c "import sys,json; d=json.load(sys.stdin); print(list(d.values())[0]['ALBDnsName'])")
           echo "✅ Prod deployed! URL: https://$ALB"
           echo "   Tear down: Actions → Teardown stack → choose prod"
+      - name: Route 53 alias (api → prod ALB)
+        env:
+          DNS_ZONE: ${{ env.DOMAIN }}
+        run: make route53-alias ENV=prod

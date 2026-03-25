@@ -91,9 +91,11 @@ func main() {
 	// Public routes
 	r.GET("/health", healthHandler.Health)
 
-	authLimit := middleware.PerIPRateLimit(rate.Every(2*time.Second), 15)
-	r.POST("/auth/register", authLimit, userHandler.Register)
-	r.POST("/auth/login", authLimit, userHandler.Login)
+	// Separate buckets so a login flood (e.g. integration tests) does not block registration.
+	registerLimit := middleware.PerIPRateLimit(rate.Every(2*time.Second), 15)
+	loginLimit := middleware.PerIPRateLimit(rate.Every(2*time.Second), 15)
+	r.POST("/auth/register", registerLimit, userHandler.Register)
+	r.POST("/auth/login", loginLimit, userHandler.Login)
 
 	// Protected routes
 	protected := r.Group("/")

@@ -59,23 +59,68 @@ type response struct {
 	RawBody    string
 }
 
-func do(t *testing.T, client *http.Client, method, url, token string, payload any) response {
-	t.Helper()
-
+// doRequest performs an HTTP call without touching *testing.T (safe for use from goroutines).
+func doRequest(client *http.Client, method, url, token string, payload any) (response, error) {
 	var body io.Reader
 	if payload != nil {
 		b, err := json.Marshal(payload)
 		if err != nil {
-			t.Fatalf("marshal payload: %v", err)
+			return response{}, err
 		}
 		body = bytes.NewReader(b)
 	}
 
 	req, err := http.NewRequestWithContext(context.Background(), method, url, body)
 	if err != nil {
-		t.Fatalf("create request: %v", err)
+		return response{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return response{}, err
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return response{}, err
+	}
+
+	var parsed map[string]any
+	_ = json.Unmarshal(raw, &parsed)
+
+	return response{
+		StatusCode: resp.StatusCode,
+		Body:       parsed,
+		RawBody:    string(raw),
+	}, nil
+}
+
+func do(t *testing.T, client *http.Client, method, url, token string, payload any) response {
+	t.Helper()
+
+	r, err := doRequest(client, method, url, token, payload)
+	if err != nil {
+		t.Fatalf("request %s %s: %v", method, url, err)
+	}
+	return r
+}
+
+// doRaw sends a request with an explicit raw body (e.g. invalid JSON). Pass contentType "" to omit the header.
+func doRaw(t *testing.T, client *http.Client, method, url, token, contentType, rawBody string) response {
+	t.Helper()
+
+	req, err := http.NewRequestWithContext(context.Background(), method, url, bytes.NewReader([]byte(rawBody)))
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}

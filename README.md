@@ -245,11 +245,14 @@ This runs unit tests, then spins up a dedicated Docker environment (separate DB 
 
 ### Run integration tests against your local server
 
-If you already have `make run` or `make docker-up` running:
+Start the API with the **same** `MONGO_DB` and `JWT_SECRET` as the test command (defaults below), e.g.:
 
 ```bash
+MONGO_DB=userservice_test JWT_SECRET=change-me-in-production make run
 make test-integration-local
 ```
+
+`make test-integration-local` defaults to `MONGO_DB=userservice_test` and `JWT_SECRET` from your environment or `change-me-in-production`, so your dev data in `userservice` is not touched and the first-user-admin rule matches an empty test DB.
 
 ### Run unit tests only
 
@@ -276,7 +279,9 @@ make docker-test-down             # clean up when done
 | `TEST_SCHEME` | `https` | `http` or `https` |
 | `TEST_SKIP_TLS_VERIFY` | `true` | Skip cert check (set `false` for prod certs) |
 | `MONGO_URI` | `mongodb://localhost:27017` | MongoDB to clean before/after tests |
-| `MONGO_DB` | `userservice` | Database name to clean |
+| `MONGO_DB` | `userservice` (`userservice_test` via `make test-integration-local`) | Database name to clean |
+| `JWT_SECRET` | _(see Makefile)_ | Must match the server for expired-JWT tests |
+| `TEST_HTTP_BASE_URL` | _(unset)_ | Optional `http://localhost:8080` for an extra plain-HTTP `/health` check |
 
 ### Pipeline usage (GitHub Actions example)
 

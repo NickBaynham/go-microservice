@@ -216,7 +216,7 @@ test-unit: check-go
 	@echo "  ✔ Unit tests passed"
 
 ## test-integration-local: Run integration tests against your local running server
-## Requires: make docker-up to be running first
+## Start the API with matching MONGO_DB/JWT_SECRET, e.g. MONGO_DB=userservice_test make run
 test-integration-local: check-go
 	@echo "→ Running integration tests against local server (https://localhost:8443)..."
 	@TEST_HOST=localhost \
@@ -224,8 +224,9 @@ test-integration-local: check-go
 	 TEST_SCHEME=https \
 	 TEST_SKIP_TLS_VERIFY=true \
 	 MONGO_URI=mongodb://localhost:27017 \
-	 MONGO_DB=userservice \
-	 go test -tags=integration ./tests/integration/... -v -count=1 -timeout 60s
+	 MONGO_DB=userservice_test \
+	 JWT_SECRET=$${JWT_SECRET:-change-me-in-production} \
+	 go test -tags=integration ./tests/integration/... -v -count=1 -timeout 120s
 	@echo "  ✔ Integration tests passed"
 
 ## test-integration: Run integration tests in isolated Docker environment (pipeline-safe)
@@ -239,6 +240,7 @@ test-integration: check-go certs
 	 TEST_SKIP_TLS_VERIFY=true \
 	 MONGO_URI=mongodb://localhost:27117 \
 	 MONGO_DB=userservice_test \
+	 JWT_SECRET=test-jwt-secret-do-not-use-in-prod \
 	 go test -tags=integration ./tests/integration/... -v -count=1 -timeout 120s; \
 	 EXIT_CODE=$$?; \
 	 docker compose -f deployments/docker-compose.test.yml down; \
@@ -257,7 +259,7 @@ docker-test-up: certs
 	@echo "  ✔ Test environment ready"
 	@echo "  ✔ API:   https://localhost:9443"
 	@echo "  ✔ Mongo: localhost:27117"
-	@echo "  ✔ Run tests: MONGO_URI=mongodb://localhost:27117 MONGO_DB=userservice_test make test-integration-local TEST_PORT=9443"
+	@echo "  ✔ Run tests: JWT_SECRET=test-jwt-secret-do-not-use-in-prod MONGO_URI=mongodb://localhost:27117 MONGO_DB=userservice_test make test-integration-local TEST_PORT=9443"
 
 ## docker-test-down: Stop isolated test environment
 docker-test-down:

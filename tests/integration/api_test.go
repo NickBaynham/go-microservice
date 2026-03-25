@@ -4,14 +4,20 @@
 //
 // Tests run against a live server (local or Docker). Configure via environment:
 //
-//	TEST_HOST            default: localhost
-//	TEST_PORT            default: 8443
-//	TEST_SCHEME          default: https
-//	TEST_SKIP_TLS_VERIFY default: true  (set false for production certs)
-//	MONGO_URI            default: mongodb://localhost:27017
-//	MONGO_DB             default: userservice
+//	TEST_HOST              default: localhost
+//	TEST_PORT              default: 8443
+//	TEST_SCHEME            default: https
+//	TEST_SKIP_TLS_VERIFY   default: true  (set false for production certs)
+//	MONGO_URI              MongoDB URI (must match the server under test)
+//	MONGO_DB               default: userservice_test (cleanup target; must match server DB)
+//	JWT_SECRET             Must match the server (default change-me-in-production; Docker test uses test-jwt-secret-do-not-use-in-prod)
+//	TEST_HTTP_BASE_URL     Optional e.g. http://localhost:8080 — runs an extra /health check over plain HTTP
+//	TEST_SKIP_RATE_LIMIT   If set (any value), skip the rate-limit subtest at the end of the suite
 //
-// Run with: make test-integration-local (server must be running first)
+// Local: start the API with the same MONGO_URI/MONGO_DB/JWT_SECRET as the test env, e.g.
+//
+//	MONGO_DB=userservice_test JWT_SECRET=change-me-in-production make run
+//	make test-integration-local
 //
 //	make test-integration       (spins up isolated Docker environment)
 package integration
@@ -20,9 +26,12 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sort"
+	"sync"
 	"testing"
 	"time"
 
+	"go-microservice/internal/auth"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -43,7 +52,7 @@ func email(name string) string {
 func cleanDB(t *testing.T) {
 	t.Helper()
 	mongoURI := getEnv("MONGO_URI", "mongodb://localhost:27017")
-	mongoDB := getEnv("MONGO_DB", "userservice")
+	mongoDB := getEnv("MONGO_DB", "userservice_test")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -135,6 +144,22 @@ func TestAPI(t *testing.T) {
 		}
 	})
 
+	t.Run("GET /health plain HTTP optional", func(t *testing.T) {
+		base := getEnv("TEST_HTTP_BASE_URL", "")
+		if base == "" {
+			t.Skip("set TEST_HTTP_BASE_URL to exercise HTTP-only mode, e.g. http://localhost:8080")
+		}
+		cl := &http.Client{Timeout: 10 * time.Second}
+		resp, err := cl.Get(base + "/health") //nolint:noctx
+		if err != nil {
+			t.Fatalf("GET %s/health: %v", base, err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("status: got %d, want 200", resp.StatusCode)
+		}
+	})
+
 	// ── Registration ─────────────────────────────────────────────────────────
 
 	t.Run("POST /auth/register creates admin user", func(t *testing.T) {
@@ -160,6 +185,21 @@ func TestAPI(t *testing.T) {
 		if adminID == "" {
 			t.Fatal("expected non-empty user id in response")
 		}
+	})
+
+	t.Run("GET /me rejects expired JWT", func(t *testing.T) {
+		if adminID == "" {
+			t.Skip("adminID not set")
+		}
+		secret := getEnv("JWT_SECRET", "change-me-in-production")
+		tok, err := auth.GenerateToken(adminID, adminEmail, "admin", secret, "0")
+		if err != nil {
+			t.Fatalf("GenerateToken: %v", err)
+		}
+		time.Sleep(1300 * time.Millisecond)
+		r := do(t, client, http.MethodGet, cfg.BaseURL+"/me", tok, nil)
+		assertStatus(t, r.StatusCode, http.StatusUnauthorized, r)
+		assertKey(t, r, "error")
 	})
 
 	t.Run("POST /auth/register creates regular user", func(t *testing.T) {
@@ -204,6 +244,68 @@ func TestAPI(t *testing.T) {
 		})
 		assertStatus(t, r.StatusCode, http.StatusBadRequest, r)
 		assertKey(t, r, "error")
+	})
+
+	t.Run("POST /auth/register rejects invalid email", func(t *testing.T) {
+		r := do(t, client, http.MethodPost, cfg.BaseURL+"/auth/register", "", map[string]any{
+			"name":     "Bad Email",
+			"email":    "not-an-email",
+			"password": "password12",
+		})
+		assertStatus(t, r.StatusCode, http.StatusBadRequest, r)
+		assertKey(t, r, "error")
+	})
+
+	t.Run("POST /auth/register rejects short name", func(t *testing.T) {
+		r := do(t, client, http.MethodPost, cfg.BaseURL+"/auth/register", "", map[string]any{
+			"name":     "A",
+			"email":    email("shortname"),
+			"password": "password12",
+		})
+		assertStatus(t, r.StatusCode, http.StatusBadRequest, r)
+		assertKey(t, r, "error")
+	})
+
+	t.Run("POST /auth/register rejects malformed JSON", func(t *testing.T) {
+		r := doRaw(t, client, http.MethodPost, cfg.BaseURL+"/auth/register", "", "application/json", `{"name":`)
+		if r.StatusCode != http.StatusBadRequest {
+			t.Errorf("status: got %d, want 400\nbody: %s", r.StatusCode, r.RawBody)
+		}
+	})
+
+	t.Run("POST /auth/register concurrent same email one succeeds", func(t *testing.T) {
+		em := email("concurrent")
+		payload := map[string]any{
+			"name":     "Concurrent",
+			"email":    em,
+			"password": "concurrent12",
+		}
+		ch := make(chan int, 2)
+		var wg sync.WaitGroup
+		for i := 0; i < 2; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				r, err := doRequest(client, http.MethodPost, cfg.BaseURL+"/auth/register", "", payload)
+				if err != nil {
+					ch <- -1
+					return
+				}
+				ch <- r.StatusCode
+			}()
+		}
+		wg.Wait()
+		c1, c2 := <-ch, <-ch
+		for _, c := range []int{c1, c2} {
+			if c == -1 {
+				t.Fatal("concurrent register request failed")
+			}
+		}
+		codes := []int{c1, c2}
+		sort.Ints(codes)
+		if len(codes) != 2 || codes[0] != http.StatusCreated || codes[1] != http.StatusConflict {
+			t.Errorf("status codes: got %v, want [201 409] in any order", []int{c1, c2})
+		}
 	})
 
 	// ── Login ─────────────────────────────────────────────────────────────────
@@ -254,6 +356,14 @@ func TestAPI(t *testing.T) {
 		assertKey(t, r, "error")
 	})
 
+	t.Run("POST /auth/login rejects missing password", func(t *testing.T) {
+		r := do(t, client, http.MethodPost, cfg.BaseURL+"/auth/login", "", map[string]any{
+			"email": adminEmail,
+		})
+		assertStatus(t, r.StatusCode, http.StatusBadRequest, r)
+		assertKey(t, r, "error")
+	})
+
 	// ── GET /me ───────────────────────────────────────────────────────────────
 
 	t.Run("GET /me returns current user", func(t *testing.T) {
@@ -292,6 +402,20 @@ func TestAPI(t *testing.T) {
 		assertStatus(t, r.StatusCode, http.StatusOK, r)
 		assertKey(t, r, "users")
 		assertKey(t, r, "count")
+
+		rawUsers, ok := r.Body["users"].([]any)
+		if !ok {
+			t.Fatalf("users: expected array, got %T", r.Body["users"])
+		}
+		for i, item := range rawUsers {
+			u, ok := item.(map[string]any)
+			if !ok {
+				t.Fatalf("users[%d]: expected object, got %T", i, item)
+			}
+			if _, has := u["password"]; has {
+				t.Errorf("users[%d]: password must not appear in list response", i)
+			}
+		}
 	})
 
 	t.Run("GET /users rejects regular user", func(t *testing.T) {
@@ -337,6 +461,15 @@ func TestAPI(t *testing.T) {
 		}
 		r := do(t, client, http.MethodGet, fmt.Sprintf("%s/users/%s", cfg.BaseURL, adminID), userToken, nil)
 		assertStatus(t, r.StatusCode, http.StatusForbidden, r)
+		assertKey(t, r, "error")
+	})
+
+	t.Run("GET /users/:id rejects invalid id", func(t *testing.T) {
+		if adminToken == "" {
+			t.Skip("adminToken not set — login test failed")
+		}
+		r := do(t, client, http.MethodGet, cfg.BaseURL+"/users/not-a-valid-object-id", adminToken, nil)
+		assertStatus(t, r.StatusCode, http.StatusNotFound, r)
 		assertKey(t, r, "error")
 	})
 
@@ -412,6 +545,42 @@ func TestAPI(t *testing.T) {
 		assertKey(t, r, "error")
 	})
 
+	t.Run("PUT /users/:id rejects invalid id", func(t *testing.T) {
+		if adminToken == "" {
+			t.Skip("adminToken not set — login test failed")
+		}
+		r := do(t, client, http.MethodPut, cfg.BaseURL+"/users/not-a-valid-object-id", adminToken, map[string]any{
+			"name": "Valid Name",
+		})
+		assertStatus(t, r.StatusCode, http.StatusNotFound, r)
+		assertKey(t, r, "error")
+	})
+
+	t.Run("PUT /users/:id returns 409 when email collides", func(t *testing.T) {
+		if adminToken == "" {
+			t.Skip("adminToken not set — login test failed")
+		}
+		emailA := email("collisionA")
+		emailB := email("collisionB")
+		regA := do(t, client, http.MethodPost, cfg.BaseURL+"/auth/register", "", map[string]any{
+			"name": "Collision A", "email": emailA, "password": "collisionpass1",
+		})
+		assertStatus(t, regA.StatusCode, http.StatusCreated, regA)
+		regB := do(t, client, http.MethodPost, cfg.BaseURL+"/auth/register", "", map[string]any{
+			"name": "Collision B", "email": emailB, "password": "collisionpass2",
+		})
+		assertStatus(t, regB.StatusCode, http.StatusCreated, regB)
+		idB := extractNestedString(regB, "user", "id")
+		if idB == "" {
+			t.Fatal("missing user id for collision B")
+		}
+		r := do(t, client, http.MethodPut, fmt.Sprintf("%s/users/%s", cfg.BaseURL, idB), adminToken, map[string]any{
+			"email": emailA,
+		})
+		assertStatus(t, r.StatusCode, http.StatusConflict, r)
+		assertKey(t, r, "error")
+	})
+
 	// ── DELETE /users/:id ─────────────────────────────────────────────────────
 
 	t.Run("DELETE /users/:id rejects regular user", func(t *testing.T) {
@@ -458,6 +627,15 @@ func TestAPI(t *testing.T) {
 		assertKey(t, r, "error")
 	})
 
+	t.Run("DELETE /users/:id rejects invalid id", func(t *testing.T) {
+		if adminToken == "" {
+			t.Skip("adminToken not set — login test failed")
+		}
+		r := do(t, client, http.MethodDelete, cfg.BaseURL+"/users/not-a-valid-object-id", adminToken, nil)
+		assertStatus(t, r.StatusCode, http.StatusNotFound, r)
+		assertKey(t, r, "error")
+	})
+
 	t.Run("GET /users/:id returns 404 after deletion", func(t *testing.T) {
 		if adminToken == "" {
 			t.Skip("adminToken not set — login test failed")
@@ -476,6 +654,24 @@ func TestAPI(t *testing.T) {
 		assertStatus(t, r.StatusCode, http.StatusNotFound, r)
 	})
 
-	_ = userToken
-	_ = extractString
+	// Run last: flooding /auth/login exhausts the per-IP bucket. With a single shared limiter
+	// (older builds) or a short refill window, doing this at the start caused 429 on later /auth/register calls.
+	t.Run("POST /auth/login returns 429 when rate limited", func(t *testing.T) {
+		if getEnv("TEST_SKIP_RATE_LIMIT", "") != "" {
+			t.Skip("TEST_SKIP_RATE_LIMIT is set")
+		}
+		n429 := 0
+		for i := 0; i < 40; i++ {
+			r := do(t, client, http.MethodPost, cfg.BaseURL+"/auth/login", "", map[string]any{
+				"email":    "rate-limit-does-not-exist@test.com",
+				"password": "wrong-password-for-rate-limit",
+			})
+			if r.StatusCode == http.StatusTooManyRequests {
+				n429++
+			}
+		}
+		if n429 == 0 {
+			t.Error("expected at least one 429 Too Many Requests from rate limiter")
+		}
+	})
 }

@@ -7,14 +7,19 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"go-microservice/internal/models"
-	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/readpref"
 )
 
-type HealthHandler struct {
-	mongo *mongo.Client
+// MongoPinger is the subset of *mongo.Client needed for health checks (testable with a stub).
+type MongoPinger interface {
+	Ping(ctx context.Context, rp *readpref.ReadPref) error
 }
 
-func NewHealthHandler(mongo *mongo.Client) *HealthHandler {
+type HealthHandler struct {
+	mongo MongoPinger
+}
+
+func NewHealthHandler(mongo MongoPinger) *HealthHandler {
 	return &HealthHandler{mongo: mongo}
 }
 

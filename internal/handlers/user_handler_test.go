@@ -33,16 +33,30 @@ func testConfig() *config.Config {
 }
 
 type mockUserStore struct {
-	count   int64
-	users   []models.User
-	byEmail map[string]int // index in users
+	count      int64
+	countErr   error
+	findAllErr error
+	users      []models.User
+	byEmail    map[string]int // email -> index in users
 }
 
 func newMockStore() *mockUserStore {
 	return &mockUserStore{byEmail: make(map[string]int)}
 }
 
+func (m *mockUserStore) userIndexByID(id primitive.ObjectID) int {
+	for i := range m.users {
+		if m.users[i].ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
 func (m *mockUserStore) Count(ctx context.Context) (int64, error) {
+	if m.countErr != nil {
+		return 0, m.countErr
+	}
 	return m.count, nil
 }
 
@@ -69,6 +83,9 @@ func (m *mockUserStore) FindByEmail(ctx context.Context, email string) (*models.
 }
 
 func (m *mockUserStore) FindAll(ctx context.Context) ([]models.User, error) {
+	if m.findAllErr != nil {
+		return nil, m.findAllErr
+	}
 	return m.users, nil
 }
 
@@ -91,16 +108,29 @@ func (m *mockUserStore) Update(ctx context.Context, id string, update bson.M) (*
 	if err != nil {
 		return nil, err
 	}
-	if name, ok := update["name"].(string); ok {
-		u.Name = name
+	idx := m.userIndexByID(u.ID)
+	if idx < 0 {
+		return nil, errNotFound
 	}
-	if email, ok := update["email"].(string); ok {
-		u.Email = email
+
+	newEmail := u.Email
+	if v, ok := update["email"].(string); ok {
+		newEmail = v
+		if newEmail != u.Email {
+			if existingIdx, exists := m.byEmail[newEmail]; exists && m.users[existingIdx].ID != u.ID {
+				return nil, repository.ErrDuplicateEmail
+			}
+			delete(m.byEmail, u.Email)
+			m.byEmail[newEmail] = idx
+		}
 	}
-	if role, ok := update["role"].(string); ok {
-		u.Role = role
+	if v, ok := update["name"].(string); ok {
+		u.Name = v
 	}
-	idx := m.byEmail[u.Email]
+	u.Email = newEmail
+	if v, ok := update["role"].(string); ok {
+		u.Role = v
+	}
 	m.users[idx] = *u
 	return u, nil
 }
@@ -111,7 +141,6 @@ func (m *mockUserStore) Delete(ctx context.Context, id string) error {
 		return err
 	}
 	delete(m.byEmail, u.Email)
-	// simplify: rebuild slice
 	next := make([]models.User, 0, len(m.users)-1)
 	m.byEmail = make(map[string]int)
 	for _, x := range m.users {
@@ -126,6 +155,24 @@ func (m *mockUserStore) Delete(ctx context.Context, id string) error {
 }
 
 var errNotFound = errors.New("not found")
+
+func registerUser(t *testing.T, h *handlers.UserHandler, name, email, password string) *models.User {
+	t.Helper()
+	body := `{"name":"` + name + `","email":"` + email + `","password":"` + password + `"}`
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/auth/register", bytes.NewReader([]byte(body)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.Register(c)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("register: %d %s", w.Code, w.Body.String())
+	}
+	var resp models.RegisterResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	return &resp.User
+}
 
 func TestRegister_FirstUserBecomesAdmin(t *testing.T) {
 	store := newMockStore()
@@ -201,5 +248,354 @@ func TestRegister_DuplicateEmail(t *testing.T) {
 		if i == 1 && w.Code != http.StatusConflict {
 			t.Fatalf("second: want 409, got %d %s", w.Code, w.Body.String())
 		}
+	}
+}
+
+func TestRegister_CountError(t *testing.T) {
+	store := newMockStore()
+	store.countErr = errors.New("database unavailable")
+	h := handlers.NewUserHandler(store, testConfig())
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/auth/register", bytes.NewReader([]byte(
+		`{"name":"XX","email":"x@example.com","password":"password12"}`,
+	)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.Register(c)
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("status: got %d, want 500", w.Code)
+	}
+}
+
+func TestLogin_Success(t *testing.T) {
+	store := newMockStore()
+	h := handlers.NewUserHandler(store, testConfig())
+	u := registerUser(t, h, "Alice", "alice@example.com", "secretpass99")
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewReader([]byte(
+		`{"email":"alice@example.com","password":"secretpass99"}`,
+	)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.Login(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	var resp models.LoginResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Token == "" {
+		t.Error("expected token")
+	}
+	if resp.User.ID != u.ID {
+		t.Errorf("user id mismatch")
+	}
+}
+
+func TestLogin_WrongPassword(t *testing.T) {
+	store := newMockStore()
+	h := handlers.NewUserHandler(store, testConfig())
+	registerUser(t, h, "Alice", "alice@example.com", "rightpass")
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewReader([]byte(
+		`{"email":"alice@example.com","password":"wrongpass"}`,
+	)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.Login(c)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status: got %d, want 401", w.Code)
+	}
+}
+
+func TestLogin_UnknownEmail(t *testing.T) {
+	store := newMockStore()
+	h := handlers.NewUserHandler(store, testConfig())
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewReader([]byte(
+		`{"email":"nobody@example.com","password":"x"}`,
+	)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.Login(c)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status: got %d, want 401", w.Code)
+	}
+}
+
+func TestLogin_TokenGenerationFailure(t *testing.T) {
+	store := newMockStore()
+	cfg := testConfig()
+	cfg.JWTExpireHours = "not-a-number"
+	h := handlers.NewUserHandler(store, cfg)
+	registerUser(t, h, "Alice", "alice@example.com", "password12")
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewReader([]byte(
+		`{"email":"alice@example.com","password":"password12"}`,
+	)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.Login(c)
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("status: got %d, want 500", w.Code)
+	}
+}
+
+func TestGetMe_Success(t *testing.T) {
+	store := newMockStore()
+	h := handlers.NewUserHandler(store, testConfig())
+	u := registerUser(t, h, "Me", "me@example.com", "password12")
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("userID", u.ID.Hex())
+	c.Request = httptest.NewRequest(http.MethodGet, "/me", nil)
+	h.GetMe(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	var got models.User
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Email != "me@example.com" {
+		t.Errorf("email: got %q", got.Email)
+	}
+}
+
+func TestGetMe_NotFound(t *testing.T) {
+	store := newMockStore()
+	h := handlers.NewUserHandler(store, testConfig())
+	fakeID := primitive.NewObjectID().Hex()
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("userID", fakeID)
+	c.Request = httptest.NewRequest(http.MethodGet, "/me", nil)
+	h.GetMe(c)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status: got %d, want 404", w.Code)
+	}
+}
+
+func TestListUsers_Success(t *testing.T) {
+	store := newMockStore()
+	h := handlers.NewUserHandler(store, testConfig())
+	registerUser(t, h, "Alice", "a@example.com", "password12")
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/users", nil)
+	h.ListUsers(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d", w.Code)
+	}
+	var resp models.ListUsersResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Count != 1 || len(resp.Users) != 1 {
+		t.Errorf("count: got %d users %d", resp.Count, len(resp.Users))
+	}
+}
+
+func TestListUsers_RepositoryError(t *testing.T) {
+	store := newMockStore()
+	store.findAllErr = errors.New("db error")
+	h := handlers.NewUserHandler(store, testConfig())
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/users", nil)
+	h.ListUsers(c)
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("status: got %d, want 500", w.Code)
+	}
+}
+
+func TestGetUser_Success(t *testing.T) {
+	store := newMockStore()
+	h := handlers.NewUserHandler(store, testConfig())
+	u := registerUser(t, h, "Bob", "bob@example.com", "password12")
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Params = gin.Params{{Key: "id", Value: u.ID.Hex()}}
+	c.Request = httptest.NewRequest(http.MethodGet, "/users/"+u.ID.Hex(), nil)
+	h.GetUser(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d", w.Code)
+	}
+}
+
+func TestGetUser_NotFound(t *testing.T) {
+	store := newMockStore()
+	h := handlers.NewUserHandler(store, testConfig())
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Params = gin.Params{{Key: "id", Value: primitive.NewObjectID().Hex()}}
+	c.Request = httptest.NewRequest(http.MethodGet, "/users/x", nil)
+	h.GetUser(c)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status: got %d, want 404", w.Code)
+	}
+}
+
+func TestUpdateUser_ForbiddenWhenNotSelfAndNotAdmin(t *testing.T) {
+	store := newMockStore()
+	h := handlers.NewUserHandler(store, testConfig())
+	admin := registerUser(t, h, "Admin", "admin@example.com", "password12")
+	user := registerUser(t, h, "User", "user@example.com", "password12")
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("userID", user.ID.Hex())
+	c.Set("role", "user")
+	c.Params = gin.Params{{Key: "id", Value: admin.ID.Hex()}}
+	c.Request = httptest.NewRequest(http.MethodPut, "/users/"+admin.ID.Hex(), bytes.NewReader([]byte(`{"name":"Hacker"}`)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.UpdateUser(c)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status: got %d, want 403", w.Code)
+	}
+}
+
+func TestUpdateUser_Self(t *testing.T) {
+	store := newMockStore()
+	h := handlers.NewUserHandler(store, testConfig())
+	u := registerUser(t, h, "Old", "self@example.com", "password12")
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("userID", u.ID.Hex())
+	c.Set("role", "user")
+	c.Params = gin.Params{{Key: "id", Value: u.ID.Hex()}}
+	c.Request = httptest.NewRequest(http.MethodPut, "/users/"+u.ID.Hex(), bytes.NewReader([]byte(`{"name":"New Name"}`)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.UpdateUser(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestUpdateUser_AdminSetsRole(t *testing.T) {
+	store := newMockStore()
+	h := handlers.NewUserHandler(store, testConfig())
+	registerUser(t, h, "Admin", "admin@example.com", "password12")
+	target := registerUser(t, h, "User", "user@example.com", "password12")
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("userID", store.users[0].ID.Hex())
+	c.Set("role", "admin")
+	c.Params = gin.Params{{Key: "id", Value: target.ID.Hex()}}
+	c.Request = httptest.NewRequest(http.MethodPut, "/users/"+target.ID.Hex(), bytes.NewReader([]byte(`{"role":"admin"}`)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.UpdateUser(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	var got models.User
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Role != "admin" {
+		t.Errorf("role: got %q", got.Role)
+	}
+}
+
+func TestUpdateUser_NonAdminCannotSetRole(t *testing.T) {
+	store := newMockStore()
+	h := handlers.NewUserHandler(store, testConfig())
+	registerUser(t, h, "Admin", "admin@example.com", "password12")
+	u := registerUser(t, h, "User", "user@example.com", "password12")
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("userID", u.ID.Hex())
+	c.Set("role", "user")
+	c.Params = gin.Params{{Key: "id", Value: u.ID.Hex()}}
+	c.Request = httptest.NewRequest(http.MethodPut, "/users/"+u.ID.Hex(), bytes.NewReader([]byte(`{"role":"admin"}`)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.UpdateUser(c)
+	// Role is stripped for non-admins; no other fields → "no fields to update"
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status: got %d, want 400 (no fields to update)", w.Code)
+	}
+}
+
+func TestUpdateUser_DuplicateEmail(t *testing.T) {
+	store := newMockStore()
+	h := handlers.NewUserHandler(store, testConfig())
+	registerUser(t, h, "Admin", "admin@example.com", "password12")
+	registerUser(t, h, "Alice", "a@example.com", "password12")
+	b := registerUser(t, h, "Bob", "b@example.com", "password12")
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("userID", store.users[0].ID.Hex())
+	c.Set("role", "admin")
+	c.Params = gin.Params{{Key: "id", Value: b.ID.Hex()}}
+	c.Request = httptest.NewRequest(http.MethodPut, "/users/"+b.ID.Hex(), bytes.NewReader([]byte(`{"email":"a@example.com"}`)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.UpdateUser(c)
+	if w.Code != http.StatusConflict {
+		t.Errorf("status: got %d, want 409", w.Code)
+	}
+}
+
+func TestUpdateUser_NoFields(t *testing.T) {
+	store := newMockStore()
+	h := handlers.NewUserHandler(store, testConfig())
+	u := registerUser(t, h, "Solo", "solo@example.com", "password12")
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("userID", u.ID.Hex())
+	c.Set("role", "user")
+	c.Params = gin.Params{{Key: "id", Value: u.ID.Hex()}}
+	c.Request = httptest.NewRequest(http.MethodPut, "/users/"+u.ID.Hex(), bytes.NewReader([]byte(`{}`)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.UpdateUser(c)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status: got %d, want 400", w.Code)
+	}
+}
+
+func TestDeleteUser_Success(t *testing.T) {
+	store := newMockStore()
+	h := handlers.NewUserHandler(store, testConfig())
+	registerUser(t, h, "Admin", "admin@example.com", "password12")
+	victim := registerUser(t, h, "Victim", "v@example.com", "password12")
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Params = gin.Params{{Key: "id", Value: victim.ID.Hex()}}
+	c.Request = httptest.NewRequest(http.MethodDelete, "/users/"+victim.ID.Hex(), nil)
+	h.DeleteUser(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d", w.Code)
+	}
+}
+
+func TestDeleteUser_NotFound(t *testing.T) {
+	store := newMockStore()
+	h := handlers.NewUserHandler(store, testConfig())
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	id := primitive.NewObjectID().Hex()
+	c.Params = gin.Params{{Key: "id", Value: id}}
+	c.Request = httptest.NewRequest(http.MethodDelete, "/users/"+id, nil)
+	h.DeleteUser(c)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status: got %d, want 404", w.Code)
 	}
 }

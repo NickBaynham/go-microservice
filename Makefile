@@ -2,7 +2,7 @@
         docker-up docker-down docker-prod-up docker-prod-down \
         docker-test-up docker-test-down \
         certs certs-trust certs-check certs-clean \
-        test test-unit test-integration test-integration-local docs
+        test test-unit test-integration test-integration-local docs lint
 
 GOMIN        := 1.22
 GOROOT_BREW  := $(shell brew --prefix go 2>/dev/null)/bin/go
@@ -214,6 +214,12 @@ test-unit: check-go
 	@echo "→ Running unit tests..."
 	@go test ./internal/... -v -count=1 -race
 	@echo "  ✔ Unit tests passed"
+
+## lint: Static analysis (go vet on all packages)
+lint: check-go
+	@echo "→ Running go vet..."
+	@go vet ./...
+	@echo "  ✔ go vet passed"
 
 ## test-integration-local: Run integration tests against your local running server
 ## Start the API with matching MONGO_DB/JWT_SECRET, e.g. MONGO_DB=userservice_test make run

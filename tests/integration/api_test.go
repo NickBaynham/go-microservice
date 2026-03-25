@@ -16,6 +16,8 @@
 //	TEST_SERVER_WAIT_SEC   How long to poll /health before failing (default 30)
 //	TEST_SKIP_FULL_DB_RESET  If set, do not delete all users in MONGO_DB before tests (only use if you know the DB is already empty; otherwise first-user admin tests fail)
 //
+// CI against a deployed ECS stack: use TestAPISmoke (go test -run TestAPISmoke). The runner cannot reach MongoDB in the task; full TestAPI needs DB access from the test process (e.g. docker-compose integration job).
+//
 // Local: start the API with the same MONGO_URI/MONGO_DB/JWT_SECRET as the test env, e.g.
 //
 //	JWT_SECRET=change-me-in-production make run
@@ -149,6 +151,32 @@ func waitForServer(t *testing.T, cfg testConfig, client *http.Client) {
 	t.Fatalf("server did not become ready within %ds calling %s\n  last: %s\n  hint: run the API in another terminal (e.g. make run for https://localhost:8443; use the same MONGO_DB as tests). If the app uses LISTEN_HTTP or ENV=production without TLS certs, it listens on plain HTTP (often :8080): TEST_SCHEME=http TEST_PORT=8080 make test-integration-local", waitSec, url, lastErr)
 }
 
+func assertHealthReturnsOK(t *testing.T, cfg testConfig, client *http.Client) {
+	t.Helper()
+	r := do(t, client, http.MethodGet, cfg.BaseURL+"/health", "", nil)
+
+	assertStatus(t, r.StatusCode, http.StatusOK, r)
+	assertStringField(t, r, "status", "healthy")
+	assertKey(t, r, "timestamp")
+
+	checks, ok := r.Body["checks"].(map[string]any)
+	if !ok {
+		t.Errorf("checks: expected object, got %T", r.Body["checks"])
+		return
+	}
+	if checks["mongodb"] != "ok" {
+		t.Errorf("checks.mongodb: got %v, want \"ok\"", checks["mongodb"])
+	}
+}
+
+// TestAPISmoke hits /health over TEST_HOST (e.g. ALB DNS in GitHub Actions). It does not connect to MongoDB from the test process — required for ECS where Mongo is only reachable inside the task.
+func TestAPISmoke(t *testing.T) {
+	cfg := loadConfig()
+	client := newClient()
+	waitForServer(t, cfg, client)
+	assertHealthReturnsOK(t, cfg, client)
+}
+
 // ── Main test suite ───────────────────────────────────────────────────────────
 
 func TestAPI(t *testing.T) {
@@ -177,20 +205,7 @@ func TestAPI(t *testing.T) {
 	// ── Health ────────────────────────────────────────────────────────────────
 
 	t.Run("GET /health returns healthy", func(t *testing.T) {
-		r := do(t, client, http.MethodGet, cfg.BaseURL+"/health", "", nil)
-
-		assertStatus(t, r.StatusCode, http.StatusOK, r)
-		assertStringField(t, r, "status", "healthy")
-		assertKey(t, r, "timestamp")
-
-		checks, ok := r.Body["checks"].(map[string]any)
-		if !ok {
-			t.Errorf("checks: expected object, got %T", r.Body["checks"])
-			return
-		}
-		if checks["mongodb"] != "ok" {
-			t.Errorf("checks.mongodb: got %v, want \"ok\"", checks["mongodb"])
-		}
+		assertHealthReturnsOK(t, cfg, client)
 	})
 
 	t.Run("GET /health plain HTTP optional", func(t *testing.T) {

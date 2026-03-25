@@ -148,6 +148,10 @@ jobs:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ env.AWS_REGION }}
+      - name: Verify CDK bootstrap IAM (AssumeRole)
+        env:
+          EXPECTED_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+        run: bash infrastructure/cdk/scripts/verify-cdk-bootstrap-iam.sh
       - name: Install AWS CDK
         run: npm install -g aws-cdk
       - name: Install CDK Go dependencies
@@ -208,6 +212,10 @@ jobs:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ env.AWS_REGION }}
+      - name: Verify CDK bootstrap IAM (AssumeRole)
+        env:
+          EXPECTED_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+        run: bash infrastructure/cdk/scripts/verify-cdk-bootstrap-iam.sh
       - name: Install AWS CDK
         run: npm install -g aws-cdk
       - name: Install CDK Go dependencies
@@ -269,6 +277,10 @@ jobs:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ env.AWS_REGION }}
+      - name: Verify CDK bootstrap IAM (AssumeRole)
+        env:
+          EXPECTED_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+        run: bash infrastructure/cdk/scripts/verify-cdk-bootstrap-iam.sh
       - name: Install AWS CDK
         run: npm install -g aws-cdk
       - name: Install CDK Go dependencies
@@ -304,6 +316,10 @@ jobs:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ env.AWS_REGION }}
+      - name: Verify CDK bootstrap IAM (AssumeRole)
+        env:
+          EXPECTED_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+        run: bash infrastructure/cdk/scripts/verify-cdk-bootstrap-iam.sh
       - name: Install AWS CDK
         run: npm install -g aws-cdk
       - name: Install CDK Go dependencies

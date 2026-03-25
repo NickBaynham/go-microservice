@@ -458,6 +458,8 @@ Confirm **CDK is bootstrapped** in that account/region (`cdk bootstrap aws://${A
 3. **Asset uploads** use the file-publishing role; direct S3 calls without a successful assume often hit “no access” because the bootstrap bucket policy allows that role—not your IAM user. Fixing **AssumeRole** + the inline policy above usually resolves it.
 4. If the staging bucket uses **SSE-KMS**, add `kms:Decrypt` / `kms:GenerateDataKey` for that key (see KMS key on the bucket in S3 console).
 
+More detail: **`infrastructure/cdk/TROUBLESHOOTING-CDK-IAM.md`**. The workflow runs **`infrastructure/cdk/scripts/verify-cdk-bootstrap-iam.sh`** before `cdk deploy` so AssumeRole failures surface immediately.
+
 ### Step 4 — Add GitHub Secrets
 
 In your repo go to **Settings → Secrets and variables → Actions** and add:

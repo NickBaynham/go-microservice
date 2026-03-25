@@ -9,14 +9,17 @@
 //	TEST_SCHEME            default: https
 //	TEST_SKIP_TLS_VERIFY   default: true  (set false for production certs)
 //	MONGO_URI              MongoDB URI (must match the server under test)
-//	MONGO_DB               default: userservice_test (cleanup target; must match server DB)
+//	MONGO_DB               default: userservice (same as cmd/server; must match the running server)
 //	JWT_SECRET             Must match the server (default change-me-in-production; Docker test uses test-jwt-secret-do-not-use-in-prod)
 //	TEST_HTTP_BASE_URL     Optional e.g. http://localhost:8080 — runs an extra /health check over plain HTTP
 //	TEST_SKIP_RATE_LIMIT   If set (any value), skip the rate-limit subtest at the end of the suite
+//	TEST_SERVER_WAIT_SEC   How long to poll /health before failing (default 30)
+//	TEST_SKIP_FULL_DB_RESET  If set, do not delete all users in MONGO_DB before tests (only use if you know the DB is already empty; otherwise first-user admin tests fail)
 //
 // Local: start the API with the same MONGO_URI/MONGO_DB/JWT_SECRET as the test env, e.g.
 //
-//	MONGO_DB=userservice_test JWT_SECRET=change-me-in-production make run
+//	JWT_SECRET=change-me-in-production make run
+//	(use MONGO_DB=userservice_test for both server and tests if you want a separate DB from dev data)
 //	make test-integration-local
 //
 //	make test-integration       (spins up isolated Docker environment)
@@ -27,6 +30,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -52,7 +56,7 @@ func email(name string) string {
 func cleanDB(t *testing.T) {
 	t.Helper()
 	mongoURI := getEnv("MONGO_URI", "mongodb://localhost:27017")
-	mongoDB := getEnv("MONGO_DB", "userservice_test")
+	mongoDB := getEnv("MONGO_DB", "userservice")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -80,25 +84,69 @@ func cleanDB(t *testing.T) {
 	t.Logf("✔ database cleaned (deleted %d test users for run %s)", res.DeletedCount, runID)
 }
 
+// resetUsersCollection deletes every document in the users collection so the first
+// POST /auth/register in this run sees Count()==0 and receives role admin. Local
+// MongoDB persists between runs; without this, leftover users break those tests.
+func resetUsersCollection(t *testing.T) {
+	t.Helper()
+	if getEnv("TEST_SKIP_FULL_DB_RESET", "") != "" {
+		t.Log("TEST_SKIP_FULL_DB_RESET set — skipping full users collection reset")
+		return
+	}
+
+	mongoURI := getEnv("MONGO_URI", "mongodb://localhost:27017")
+	mongoDB := getEnv("MONGO_DB", "userservice")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	client, err := mongo.Connect(ctx, options.Client().ApplyURI(mongoURI))
+	if err != nil {
+		t.Fatalf("reset users: connect %s: %v", mongoURI, err)
+	}
+	defer client.Disconnect(ctx) //nolint:errcheck
+
+	if err := client.Ping(ctx, nil); err != nil {
+		t.Fatalf("reset users: ping %s: %v", mongoURI, err)
+	}
+
+	res, err := client.Database(mongoDB).Collection("users").DeleteMany(ctx, bson.M{})
+	if err != nil {
+		t.Fatalf("reset users: %v", err)
+	}
+	t.Logf("✔ cleared users collection in %q (%d documents removed)", mongoDB, res.DeletedCount)
+}
+
 // ── Wait for server ───────────────────────────────────────────────────────────
 
 func waitForServer(t *testing.T, cfg testConfig, client *http.Client) {
 	t.Helper()
 	url := cfg.BaseURL + "/health"
-	deadline := time.Now().Add(30 * time.Second)
+	waitSec := 30
+	if s := getEnv("TEST_SERVER_WAIT_SEC", ""); s != "" {
+		if v, err := strconv.Atoi(s); err == nil && v > 0 {
+			waitSec = v
+		}
+	}
+	deadline := time.Now().Add(time.Duration(waitSec) * time.Second)
+	var lastErr string
 	for time.Now().Before(deadline) {
 		resp, err := client.Get(url) //nolint:noctx
-		if err == nil && resp.StatusCode == http.StatusOK {
+		if err != nil {
+			lastErr = err.Error()
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+		if resp.StatusCode == http.StatusOK {
 			resp.Body.Close()
 			t.Log("✔ server is ready")
 			return
 		}
-		if resp != nil {
-			resp.Body.Close()
-		}
+		lastErr = fmt.Sprintf("HTTP %d (want 200; 503 usually means MongoDB unreachable)", resp.StatusCode)
+		resp.Body.Close()
 		time.Sleep(500 * time.Millisecond)
 	}
-	t.Fatal("server did not become ready within 30 seconds")
+	t.Fatalf("server did not become ready within %ds calling %s\n  last: %s\n  hint: run the API in another terminal (e.g. make run for https://localhost:8443; use the same MONGO_DB as tests). If the app uses LISTEN_HTTP or ENV=production without TLS certs, it listens on plain HTTP (often :8080): TEST_SCHEME=http TEST_PORT=8080 make test-integration-local", waitSec, url, lastErr)
 }
 
 // ── Main test suite ───────────────────────────────────────────────────────────
@@ -108,6 +156,7 @@ func TestAPI(t *testing.T) {
 	client := newClient()
 
 	waitForServer(t, cfg, client)
+	resetUsersCollection(t)
 	t.Cleanup(func() { cleanDB(t) })
 
 	// Use unique emails for this test run

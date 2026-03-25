@@ -222,15 +222,16 @@ lint: check-go
 	@echo "  ✔ go vet passed"
 
 ## test-integration-local: Run integration tests against your local running server
-## Start the API with matching MONGO_DB/JWT_SECRET, e.g. MONGO_DB=userservice_test make run
+## Uses same MONGO_DB default as the app (userservice). Override MONGO_DB for both server and tests if needed.
+## If the app listens on HTTP only (LISTEN_HTTP or prod without TLS), use TEST_SCHEME=http TEST_PORT=8080
 test-integration-local: check-go
-	@echo "→ Running integration tests against local server (https://localhost:8443)..."
+	@echo "→ Running integration tests against local server (default https://localhost:8443 — server must already be running)..."
 	@TEST_HOST=localhost \
 	 TEST_PORT=8443 \
 	 TEST_SCHEME=https \
 	 TEST_SKIP_TLS_VERIFY=true \
-	 MONGO_URI=mongodb://localhost:27017 \
-	 MONGO_DB=userservice_test \
+	 MONGO_URI=$${MONGO_URI:-mongodb://localhost:27017} \
+	 MONGO_DB=$${MONGO_DB:-userservice} \
 	 JWT_SECRET=$${JWT_SECRET:-change-me-in-production} \
 	 go test -tags=integration ./tests/integration/... -v -count=1 -timeout 120s
 	@echo "  ✔ Integration tests passed"

@@ -1,0 +1,29 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AssumeCDKBootstrapRoles",
+      "Effect": "Allow",
+      "Action": "sts:AssumeRole",
+      "Resource": "arn:aws:iam::REPLACE_ACCOUNT_ID:role/cdk-hnb659fds-*"
+    },
+    {
+      "Sid": "CDKStagingBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:PutObjectTagging",
+        "s3:DeleteObject",
+        "s3:ListBucket",
+        "s3:GetBucketLocation",
+        "s3:AbortMultipartUpload",
+        "s3:ListBucketMultipartUploads"
+      ],
+      "Resource": [
+        "arn:aws:s3:::cdk-hnb659fds-assets-REPLACE_ACCOUNT_ID-REPLACE_REGION",
+        "arn:aws:s3:::cdk-hnb659fds-assets-REPLACE_ACCOUNT_ID-REPLACE_REGION/*"
+      ]
+    }
+  ]
+}

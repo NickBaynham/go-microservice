@@ -362,7 +362,7 @@ aws-ecr-push: docs
 	@echo "→ Building and pushing to ECR..."
 	@aws ecr get-login-password --region $(AWS_REGION) | \
 	  docker login --username AWS --password-stdin $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com
-	@docker build -t go-microservice:$(TAG) .
+	@docker build --platform linux/amd64 -t go-microservice:$(TAG) .
 	@docker tag go-microservice:$(TAG) \
 	  $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/go-microservice:$(TAG)
 	@docker tag go-microservice:$(TAG) \

@@ -426,6 +426,38 @@ done
 aws iam create-access-key --user-name github-actions-go-microservice
 ```
 
+#### CDK asset publishing (required for `cdk deploy` in CI)
+
+Modern **CDK v2 bootstrap** stores assets in an S3 bucket (`cdk-hnb659fds-assets-<account>-<region>`) and uses IAM roles whose names start with `cdk-hnb659fds-`. The managed policies in Step 3 do **not** grant `sts:AssumeRole` on those roles or S3 access to that bucket, so **`cdk deploy` from GitHub Actions can fail** during the asset publishing phase with *access denied* on the staging bucket or *cannot assume* the file-publishing role.
+
+Attach an **inline policy** to the same IAM user (replace `REPLACE_ACCOUNT_ID`, `REPLACE_REGION`, and the username if needed):
+
+```bash
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+REGION=us-east-1   # same region as CDK / workflow env AWS_REGION
+
+sed -e "s/REPLACE_ACCOUNT_ID/${ACCOUNT_ID}/g" \
+    -e "s/REPLACE_REGION/${REGION}/g" \
+    infrastructure/cdk/iam/github-actions-cdk-bootstrap-policy.json > /tmp/gha-cdk-bootstrap-policy.json
+
+aws iam put-user-policy \
+  --user-name github-actions-go-microservice \
+  --policy-name GitHubActionsCDKBootstrap \
+  --policy-document file:///tmp/gha-cdk-bootstrap-policy.json
+```
+
+Confirm **CDK is bootstrapped** in that account/region (`cdk bootstrap aws://${ACCOUNT_ID}/${REGION}`). If the bucket or role names in your account differ (custom bootstrap), inspect the **CDKToolkit** CloudFormation stack outputs and extend the policy to match.
+
+**If `cdk deploy` still fails** with *could not be used to assume* `cdk-hnb659fds-*-role` or *Bucket exists, but we dont have access*:
+
+1. **Confirm the policy is attached** to the same IAM user as your GitHub secrets:  
+   `aws iam list-user-policies --user-name github-actions-go-microservice`
+2. **Test role assumption** with those credentials (same access keys as in GitHub):  
+   `aws sts assume-role --role-arn arn:aws:iam::ACCOUNT_ID:role/cdk-hnb659fds-file-publishing-role-ACCOUNT_ID-us-east-1 --role-session-name cdk-test`  
+   If this fails, fix the role’s **trust policy** so your IAM user (or `arn:aws:iam::ACCOUNT_ID:root`) can assume it, and ensure no **permission boundary** or **Organizations SCP** blocks `sts:AssumeRole`.
+3. **Asset uploads** use the file-publishing role; direct S3 calls without a successful assume often hit “no access” because the bootstrap bucket policy allows that role—not your IAM user. Fixing **AssumeRole** + the inline policy above usually resolves it.
+4. If the staging bucket uses **SSE-KMS**, add `kms:Decrypt` / `kms:GenerateDataKey` for that key (see KMS key on the bucket in S3 console).
+
 ### Step 4 — Add GitHub Secrets
 
 In your repo go to **Settings → Secrets and variables → Actions** and add:

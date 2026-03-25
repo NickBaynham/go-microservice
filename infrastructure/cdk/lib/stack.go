@@ -2,6 +2,7 @@ package lib
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/aws/aws-cdk-go/awscdk/v2"
 	"github.com/aws/aws-cdk-go/awscdk/v2/awscertificatemanager"
@@ -121,9 +122,12 @@ func NewGoMicroserviceStack(scope constructs.Construct, id string, props *GoMicr
 		RemovalPolicy: awscdk.RemovalPolicy_DESTROY,
 	})
 
+	// App image from looked-up ECR repo (wires pull policy; avoids FromRegistry ECR warning)
+	appImageTag := ecrImageTagFromURI(props.AppImage)
+
 	// App container
 	appContainer := taskDef.AddContainer(jsii.String("app"), &awsecs.ContainerDefinitionOptions{
-		Image:     awsecs.ContainerImage_FromRegistry(jsii.String(props.AppImage), nil),
+		Image: awsecs.ContainerImage_FromEcrRepository(repo, jsii.String(appImageTag)),
 		Essential: jsii.Bool(true),
 		Environment: &map[string]*string{
 			"PORT":             jsii.String("8080"),
@@ -270,4 +274,12 @@ func NewGoMicroserviceStack(scope constructs.Construct, id string, props *GoMicr
 	})
 
 	return stack
+}
+
+// ecrImageTagFromURI returns the tag part of a full ECR image URI (e.g. .../repo:tag → tag).
+func ecrImageTagFromURI(uri string) string {
+	if i := strings.LastIndex(uri, ":"); i >= 0 && i < len(uri)-1 {
+		return uri[i+1:]
+	}
+	return "latest"
 }

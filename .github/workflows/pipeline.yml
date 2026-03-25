@@ -8,10 +8,10 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: 'Action to perform on prod'
+        description: 'Manual prod deploy (requires prod environment approval if configured)'
         required: true
         type: choice
-        options: [deploy-prod, destroy-prod]
+        options: [deploy-prod]
 
 env:
   AWS_REGION:     us-east-1
@@ -19,6 +19,7 @@ env:
   CDK_DIR:        infrastructure/cdk
   # Apex domain (matches DOMAIN in root .env). Used for Route 53 / local tooling; deploy jobs hit the ALB until DNS is wired.
   DOMAIN: ${{ vars.DOMAIN || 'calgentik.com' }}
+  # Optional repo Variables: DESTROY_DEV_AFTER_DEPLOY / DESTROY_TEST_AFTER_DEPLOY = true → run cdk destroy after smoke (default: leave stacks up; use "Teardown stack" workflow to remove).
   # Opt into Node.js 24 for JS-based actions before GitHub’s default switch (see GitHub changelog 2025-09-19).
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -102,7 +103,7 @@ jobs:
           go-version: '1.26'
           cache: true
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        uses: aws-actions/configure-aws-credentials@8df5847569e6427dd6c4fb1cf565c83acfa8afa7 # v6.0.0 (Node 24)
         with:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -135,18 +136,19 @@ jobs:
 
   # ── Deploy to Dev ─────────────────────────────────────────────────────────────
   deploy-dev:
-    name: Deploy → Dev → Smoke Test → Destroy
+    name: Deploy → Dev → Smoke
     runs-on: ubuntu-latest
     needs: build
     environment: dev
     # Smoke uses ALB DNS from CDK outputs (skip TLS verify; cert is for your domain, not *.elb.amazonaws.com). Add Route 53 + dev-api.{DOMAIN} later for hostname-based checks.
+    # Next job (deploy-test) uses environment "test" — enable required reviewers on that environment to gate dev → test.
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
           go-version: '1.26'
           cache: true
-      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+      - uses: aws-actions/configure-aws-credentials@8df5847569e6427dd6c4fb1cf565c83acfa8afa7 # v6.0.0 (Node 24)
         with:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -186,7 +188,7 @@ jobs:
           TEST_HOST=$ALB TEST_PORT=443 TEST_SCHEME=https TEST_SKIP_TLS_VERIFY=true \
           go test -tags=integration ./tests/integration/... -v -count=1 -run TestAPISmoke -timeout 120s
       - name: CDK destroy (dev)
-        if: always()
+        if: always() && vars.DESTROY_DEV_AFTER_DEPLOY == 'true'
         env:
           CDK_ENV: dev
           CDK_REGION: ${{ env.AWS_REGION }}
@@ -201,10 +203,11 @@ jobs:
 
   # ── Deploy to Test ────────────────────────────────────────────────────────────
   deploy-test:
-    name: Deploy → Test → ALB Smoke → Destroy
+    name: Deploy → Test → ALB Smoke
     runs-on: ubuntu-latest
     needs: [build, deploy-dev]
     environment: test
+    # Required reviewers on GitHub Environment "test" = manual approval before this job runs (after dev succeeds).
     # Integration tests use ALB DNS from CDK (skip TLS verify) until Route 53 points test-api.{DOMAIN} at the ALB.
     steps:
       - uses: actions/checkout@v6
@@ -212,7 +215,7 @@ jobs:
         with:
           go-version: '1.26'
           cache: true
-      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+      - uses: aws-actions/configure-aws-credentials@8df5847569e6427dd6c4fb1cf565c83acfa8afa7 # v6.0.0 (Node 24)
         with:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -253,7 +256,7 @@ jobs:
           TEST_HOST=$ALB TEST_PORT=443 TEST_SCHEME=https TEST_SKIP_TLS_VERIFY=true \
           go test -tags=integration ./tests/integration/... -v -count=1 -run TestAPISmoke -timeout 120s
       - name: CDK destroy (test)
-        if: always()
+        if: always() && vars.DESTROY_TEST_AFTER_DEPLOY == 'true'
         env:
           CDK_ENV: test
           CDK_REGION: ${{ env.AWS_REGION }}
@@ -266,18 +269,19 @@ jobs:
           CDK_TASK_MEMORY: "1024"
         run: cd $CDK_DIR && cdk destroy GoMicroservice-Test --force
 
-  # ── Deploy to Prod (manual approval) ─────────────────────────────────────────
+  # ── Deploy to Prod (manual approval via GitHub Environment "prod") ─────────────
   deploy-prod:
     name: Deploy → Prod
     runs-on: ubuntu-latest
     needs: [build, deploy-test]
     environment: prod
+    # Required reviewers on Environment "prod" = manual approval before deploy (after test succeeds).
     if: |
       (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'deploy-prod')
     steps:
       - uses: actions/checkout@v6
-      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+      - uses: aws-actions/configure-aws-credentials@8df5847569e6427dd6c4fb1cf565c83acfa8afa7 # v6.0.0 (Node 24)
         with:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -306,48 +310,4 @@ jobs:
           cdk deploy GoMicroservice-Prod --require-approval never --outputs-file outputs.json
           ALB=$(cat outputs.json | python3 -c "import sys,json; d=json.load(sys.stdin); print(list(d.values())[0]['ALBDnsName'])")
           echo "✅ Prod deployed! URL: https://$ALB"
-          echo "   Tear down: Actions → Run workflow → destroy-prod"
-
-  # ── Destroy Prod (manual trigger only) ───────────────────────────────────────
-  destroy-prod:
-    name: Destroy Prod
-    runs-on: ubuntu-latest
-    environment: prod
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy-prod'
-    steps:
-      - uses: actions/checkout@v6
-      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
-        with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ${{ env.AWS_REGION }}
-      - name: Verify CDK bootstrap IAM (AssumeRole)
-        env:
-          EXPECTED_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-        run: bash infrastructure/cdk/scripts/verify-cdk-bootstrap-iam.sh
-      - name: Install AWS CDK
-        run: npm install -g aws-cdk
-      - name: Install CDK Go dependencies
-        run: cd $CDK_DIR && go mod download
-      - name: Get latest ECR image tag
-        id: ecr
-        run: |
-          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
-          TAG=$(aws ecr describe-images \
-            --repository-name $ECR_REPOSITORY \
-            --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags[0]' \
-            --output text)
-          echo "image=$ACCOUNT.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/$ECR_REPOSITORY:$TAG" >> $GITHUB_OUTPUT
-      - name: CDK destroy (prod)
-        env:
-          CDK_ENV: prod
-          CDK_REGION: ${{ env.AWS_REGION }}
-          CDK_ACCOUNT: ${{ secrets.AWS_ACCOUNT_ID }}
-          CDK_APP_IMAGE: ${{ steps.ecr.outputs.image }}
-          CDK_CERT_ARN: ${{ secrets.ACM_CERTIFICATE_ARN }}
-          CDK_JWT_SECRET: ${{ secrets.JWT_SECRET }}
-          CDK_DESIRED_COUNT: "2"
-          CDK_TASK_CPU: "512"
-          CDK_TASK_MEMORY: "1024"
-        run: cd $CDK_DIR && cdk destroy GoMicroservice-Prod --force
-      - run: echo "✅ Prod destroyed — zero ongoing cost"
+          echo "   Tear down: Actions → Teardown stack → choose prod"

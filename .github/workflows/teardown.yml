@@ -1,0 +1,92 @@
+# Manually destroy a deployed CDK stack (dev, test, or prod).
+# Configure GitHub Environment protection rules on dev / test / prod as needed (e.g. required reviewers before destroy).
+
+name: Teardown stack
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Stack to destroy'
+        required: true
+        type: choice
+        options:
+          - dev
+          - test
+          - prod
+
+env:
+  AWS_REGION:     us-east-1
+  ECR_REPOSITORY: go-microservice
+  CDK_DIR:        infrastructure/cdk
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  destroy:
+    name: CDK destroy (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: aws-actions/configure-aws-credentials@8df5847569e6427dd6c4fb1cf565c83acfa8afa7 # v6.0.0 (Node 24)
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+      - name: Verify CDK bootstrap IAM (AssumeRole)
+        env:
+          EXPECTED_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+        run: bash infrastructure/cdk/scripts/verify-cdk-bootstrap-iam.sh
+      - name: Install AWS CDK
+        run: npm install -g aws-cdk
+      - name: Install CDK Go dependencies
+        run: cd $CDK_DIR && go mod download
+      - name: Resolve stack and CDK sizing (must match deploy)
+        id: ctx
+        run: |
+          case "${{ inputs.environment }}" in
+            dev)
+              echo "stack=GoMicroservice-Dev" >> $GITHUB_OUTPUT
+              echo "desired=1" >> $GITHUB_OUTPUT
+              echo "cpu=256" >> $GITHUB_OUTPUT
+              echo "mem=512" >> $GITHUB_OUTPUT
+              ;;
+            test)
+              echo "stack=GoMicroservice-Test" >> $GITHUB_OUTPUT
+              echo "desired=1" >> $GITHUB_OUTPUT
+              echo "cpu=512" >> $GITHUB_OUTPUT
+              echo "mem=1024" >> $GITHUB_OUTPUT
+              ;;
+            prod)
+              echo "stack=GoMicroservice-Prod" >> $GITHUB_OUTPUT
+              echo "desired=2" >> $GITHUB_OUTPUT
+              echo "cpu=512" >> $GITHUB_OUTPUT
+              echo "mem=1024" >> $GITHUB_OUTPUT
+              ;;
+            *)
+              echo "unknown environment"; exit 1
+              ;;
+          esac
+      - name: Get latest ECR image tag (required for CDK destroy context)
+        id: ecr
+        run: |
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          TAG=$(aws ecr describe-images \
+            --repository-name $ECR_REPOSITORY \
+            --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags[0]' \
+            --output text)
+          echo "image=$ACCOUNT.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/$ECR_REPOSITORY:$TAG" >> $GITHUB_OUTPUT
+      - name: CDK destroy
+        env:
+          CDK_ENV: ${{ inputs.environment }}
+          CDK_REGION: ${{ env.AWS_REGION }}
+          CDK_ACCOUNT: ${{ secrets.AWS_ACCOUNT_ID }}
+          CDK_APP_IMAGE: ${{ steps.ecr.outputs.image }}
+          CDK_CERT_ARN: ${{ secrets.ACM_CERTIFICATE_ARN }}
+          CDK_JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          CDK_DESIRED_COUNT: ${{ steps.ctx.outputs.desired }}
+          CDK_TASK_CPU: ${{ steps.ctx.outputs.cpu }}
+          CDK_TASK_MEMORY: ${{ steps.ctx.outputs.mem }}
+        run: cd $CDK_DIR && cdk destroy ${{ steps.ctx.outputs.stack }} --force
+      - name: Done
+        run: echo "Destroyed ${{ steps.ctx.outputs.stack }}"

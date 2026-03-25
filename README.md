@@ -508,8 +508,10 @@ Edit `infrastructure/cdk/environments/dev.env`, `test.env`, and `prod.env` and f
 Push to `main` — the pipeline runs automatically:
 
 ```
-unit tests → integration tests → build image → dev → test → prod (approval)
+unit tests → integration tests → build image → dev → [approve "test" env] → test → [approve "prod" env] → prod
 ```
+
+Configure **Settings → Environments** in GitHub: add **required reviewers** on **`test`** (gate before the test deploy job) and **`prod`** (gate before prod deploy). Leave **`dev`** without reviewers if you want dev to deploy automatically after build. **Dev and test stacks are left running** after smoke tests by default (no extra variables). To **auto-destroy** after a job, set repository **Variables** **`DESTROY_DEV_AFTER_DEPLOY`** or **`DESTROY_TEST_AFTER_DEPLOY`** to **`true`**. Tear down manually via **Actions → Teardown stack** when you are done.
 
 Or deploy manually:
 
@@ -595,8 +597,8 @@ make aws-test ENV=prod
 # Tail CloudWatch logs
 make aws-logs ENV=prod
 
-# Tear down when done (zero cost)
-# Actions → CI/CD Pipeline → Run workflow → destroy-prod
+# Tear down when done (zero cost) — pick dev, test, or prod
+# Actions → Teardown stack → Run workflow → environment
 ```
 
 ### Cost estimate

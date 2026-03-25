@@ -2,7 +2,7 @@
         docker-up docker-down docker-prod-up docker-prod-down \
         docker-test-up docker-test-down \
         certs certs-trust certs-check certs-clean \
-        test test-unit test-integration test-integration-local docs lint
+        test test-unit test-integration test-integration-local docs lint route53-alias
 
 GOMIN        := 1.22
 GOROOT_BREW  := $(shell brew --prefix go 2>/dev/null)/bin/go
@@ -280,6 +280,27 @@ docker-test-down:
 AWS_REGION  ?= us-east-1
 ENV         ?= dev
 CDK_DIR     := infrastructure/cdk
+
+# DOMAIN from .env only (grep — avoids loading JWT and other secrets into Make)
+DOMAIN_FROM_ENV := $(shell [ -f .env ] && grep -E '^[[:space:]]*DOMAIN=' .env | tail -1 | cut -d= -f2- | tr -d '\r"[:space:]')
+DNS_ZONE        ?= $(DOMAIN_FROM_ENV)
+
+## route53-alias: Upsert alias A record → ALB (dev-api / test-api / api per ENV)
+## Usage: make route53-alias ENV=dev
+## Prerequisite: CDK stack must exist (e.g. make aws-up ENV=dev …). Set DOMAIN in .env or DNS_ZONE=…
+## Requires: Route 53 hosted zone, AWS CLI credentials
+route53-alias:
+	@if [ -z "$(DNS_ZONE)" ]; then \
+	  echo "Set DOMAIN=yourdomain.com in .env (or DNS_ZONE=... on the command line)"; \
+	  exit 1; \
+	fi
+	@case "$(ENV)" in \
+	  dev)  _LABEL=dev-api;  _STACK=GoMicroservice-Dev;; \
+	  test) _LABEL=test-api; _STACK=GoMicroservice-Test;; \
+	  prod) _LABEL=api;      _STACK=GoMicroservice-Prod;; \
+	  *) echo "ENV must be dev, test, or prod"; exit 1;; \
+	esac; \
+	bash $(CDK_DIR)/scripts/upsert-route53-alb-alias.sh "$(DNS_ZONE)" "$$_LABEL" "$$_STACK" "$(AWS_REGION)"
 
 ## cdk-install: Install the AWS CDK CLI
 cdk-install:

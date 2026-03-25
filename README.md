@@ -65,6 +65,18 @@ make run     # starts HTTPS server at https://localhost:8443
 
 That's it! `make setup` handles everything — Go installation, `.env`, dependencies, and self-signed dev certificates.
 
+### Configuration file (`.env`)
+
+Local settings live in a **`.env`** file at the repo root. It is **gitignored** — do not commit secrets.
+
+1. Copy the template and edit values:
+   ```bash
+   cp .env.example .env
+   ```
+2. **`.env.example`** in the repo lists every variable with **dummy / safe placeholders** and short comments. Use it as the canonical checklist; the table below describes behavior and defaults.
+3. **Production:** use a long random `JWT_SECRET` (e.g. `openssl rand -hex 32`). Match **`DOMAIN`** in `.env` to your real apex domain; set the same **`DOMAIN`** as a **GitHub repository Variable** so CI health checks use `dev-api.<DOMAIN>`, etc.
+4. Variables not set in `.env` fall back to built-in defaults where the app defines them (see `internal/config`).
+
 ### All available Make commands
 
 | Command | Description |
@@ -132,6 +144,8 @@ curl -k https://localhost:8443/health
 
 ## Environment Variables
 
+These are usually set in **`.env`** (loaded at startup). Most map to `internal/config.Config`; **`LISTEN_HTTP`** is read separately for HTTP-only mode behind a proxy. **`DOMAIN`** is for **`make route53-alias`** and GitHub **`DOMAIN`** variable (not read by the Go binary). See **`.env.example`** for a full commented template with dummy values.
+
 | Variable         | Default                   | Description                                      |
 |------------------|---------------------------|--------------------------------------------------|
 | PORT             | 8080                      | HTTP listen port when TLS is offloaded (Compose prod, ECS) |
@@ -144,6 +158,7 @@ curl -k https://localhost:8443/health
 | JWT_EXPIRE_HOURS | 24                        | Token expiry in hours (**0–8760**; invalid values fall back to 24 outside prod) |
 | TLS_CERT         | _(empty)_                 | Cert PEM path; empty + `production`/`prod` ⇒ HTTP on PORT (proxy terminates TLS) |
 | TLS_KEY          | _(empty)_                 | Key PEM path; same as TLS_CERT                   |
+| DOMAIN           | _(unset)_                 | Public **DNS apex** (e.g. `example.com`). Used by **`make route53-alias`** (`DNS_ZONE` defaults to this). Set the same name as GitHub repo Variable **`DOMAIN`** for CI hostnames. |
 
 Registration ignores any client-supplied role: the **first** account in the database is **`admin`**, every later signup is **`user`**.
 
@@ -529,6 +544,44 @@ Then add an Alias A record in Route 53:
 | Record type | A |
 | Route traffic to | Alias to ALB |
 | ALB DNS name | Output from above |
+
+**AWS Console (one record at a time)**  
+1. **Route 53 → Hosted zones →** your zone (**`calgentik.com`**).  
+2. **Create record**.  
+3. **Record name:** `dev-api` (Route 53 appends the zone → `dev-api.calgentik.com`). For prod use `api` if you want `api.calgentik.com`.  
+4. **Record type:** **A**.  
+5. Turn **Alias** **on**.  
+6. **Route traffic to:** **Application and Classic Load Balancer** → region **us-east-1** → pick the load balancer that belongs to **that** stack (name often contains `go-microservice-dev`, `test`, or `prod`).  
+7. **Create records**.  
+Repeat for **`test-api`** using the **test** stack’s ALB, and keep **`api`** pointing at the **prod** ALB.
+
+**Makefile (wraps the same script):**
+
+```bash
+# DOMAIN=example.com in .env (or DNS_ZONE=... to override once)
+make route53-alias ENV=dev
+make route53-alias ENV=test
+make route53-alias ENV=prod
+```
+
+**`DNS_ZONE`** defaults to **`DOMAIN`** from `.env` (apex zone, e.g. `example.com`).
+
+**Prerequisite:** the **CDK stack must already exist** in AWS (e.g. `make aws-up ENV=dev …` or a successful **`cdk deploy GoMicroservice-Dev`**). If you see *Stack … does not exist*, deploy that environment first; the script only reads the ALB DNS from CloudFormation outputs.
+
+**Or call the script directly** — after each stack exists and has `ALBDnsName` output:
+
+```bash
+cd infrastructure/cdk/scripts
+./upsert-route53-alb-alias.sh calgentik.com dev-api   GoMicroservice-Dev
+./upsert-route53-alb-alias.sh calgentik.com test-api  GoMicroservice-Test
+./upsert-route53-alb-alias.sh calgentik.com api       GoMicroservice-Prod
+```
+
+(`GoMicroservice-Dev` / `Test` / `Prod` are the default CDK stack IDs from `CDK_ENV`.)
+
+**Domain name (single source of truth):** set **`DOMAIN`** to your zone apex in **`.env`** (see **`.env.example`**) for local **`make route53-alias`**. For CI, set the same value as a **repository Variable** **`DOMAIN`** under **Settings → Secrets and variables → Actions → Variables** (the workflow defaults to `calgentik.com` if unset).
+
+The **dev** and **test** jobs in GitHub Actions run health checks and integration tests against the stack’s **ALB DNS name** from CDK outputs (with TLS verification skipped for that hostname). **Route 53** aliases such as **`dev-api.${DOMAIN}`** / **`test-api.${DOMAIN}`** are optional in CI until you want hostname-based checks; create them with **`make route53-alias`** after the stack exists. **Prod** is typically **`api.${DOMAIN}`**. **Dev** / **test** / **prod** are separate stacks (separate ALBs). Public hostnames need a **Route 53** alias to that stack’s ALB and **ACM** coverage for strict TLS.
 
 ### Day-to-day demo workflow
 

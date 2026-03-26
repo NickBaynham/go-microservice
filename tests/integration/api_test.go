@@ -13,6 +13,8 @@
 //	JWT_SECRET             Must match the server (default change-me-in-production; Docker test uses test-jwt-secret-do-not-use-in-prod)
 //	TEST_HTTP_BASE_URL     Optional e.g. http://localhost:8080 — runs an extra /health check over plain HTTP
 //	TEST_SKIP_RATE_LIMIT   If set (any value), skip the rate-limit subtest at the end of the suite
+//
+// Password reset: POST /auth/forgot-password and /auth/reset-password are covered in TestAPI. Reset uses JWTs signed with JWT_SECRET (same as access tokens, different claims).
 //	TEST_SERVER_WAIT_SEC   How long to poll /health before failing (default 30)
 //	TEST_SKIP_FULL_DB_RESET  If set, do not delete all users in MONGO_DB before tests (only use if you know the DB is already empty; otherwise first-user admin tests fail)
 //
@@ -30,9 +32,11 @@ package integration
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -117,6 +121,12 @@ func resetUsersCollection(t *testing.T) {
 		t.Fatalf("reset users: %v", err)
 	}
 	t.Logf("✔ cleared users collection in %q (%d documents removed)", mongoDB, res.DeletedCount)
+
+	if r2, err := client.Database(mongoDB).Collection("refresh_tokens").DeleteMany(ctx, bson.M{}); err != nil {
+		t.Fatalf("reset refresh_tokens: %v", err)
+	} else {
+		t.Logf("✔ cleared refresh_tokens collection (%d documents removed)", r2.DeletedCount)
+	}
 }
 
 // ── Wait for server ───────────────────────────────────────────────────────────
@@ -206,6 +216,48 @@ func TestAPI(t *testing.T) {
 
 	t.Run("GET /health returns healthy", func(t *testing.T) {
 		assertHealthReturnsOK(t, cfg, client)
+	})
+
+	t.Run("GET /metrics returns Prometheus text", func(t *testing.T) {
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, cfg.BaseURL+"/metrics", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET /metrics: status %d", resp.StatusCode)
+		}
+		raw, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := string(raw)
+		if !strings.Contains(body, "gomicro_http_requests_total") {
+			t.Errorf("expected gomicro_http_requests_total in /metrics body (prefix %.400q)", body)
+		}
+	})
+
+	t.Run("X-Request-ID header is echoed", func(t *testing.T) {
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, cfg.BaseURL+"/health", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("X-Request-ID", "integration-test-req-id")
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status %d", resp.StatusCode)
+		}
+		if got := resp.Header.Get("X-Request-ID"); got != "integration-test-req-id" {
+			t.Errorf("X-Request-ID: got %q, want integration-test-req-id", got)
+		}
 	})
 
 	t.Run("GET /health plain HTTP optional", func(t *testing.T) {
@@ -382,6 +434,10 @@ func TestAPI(t *testing.T) {
 
 		assertStatus(t, r.StatusCode, http.StatusOK, r)
 		adminToken = assertNonEmptyString(t, r, "token")
+		if assertNonEmptyString(t, r, "access_token") != adminToken {
+			t.Error("access_token must match token for API clients")
+		}
+		assertNonEmptyString(t, r, "refresh_token")
 		assertNestedStringField(t, r, "user", "email", adminEmail)
 		assertNestedStringField(t, r, "user", "role", "admin")
 
@@ -399,7 +455,36 @@ func TestAPI(t *testing.T) {
 		})
 		assertStatus(t, r.StatusCode, http.StatusOK, r)
 		userToken = assertNonEmptyString(t, r, "token")
+		assertNonEmptyString(t, r, "refresh_token")
 		assertNestedStringField(t, r, "user", "email", userEmail)
+	})
+
+	t.Run("POST /auth/refresh rotates refresh and invalidates old", func(t *testing.T) {
+		login := do(t, client, http.MethodPost, cfg.BaseURL+"/auth/login", "", map[string]any{
+			"email":    adminEmail,
+			"password": adminPass,
+		})
+		assertStatus(t, login.StatusCode, http.StatusOK, login)
+		oldRT, _ := login.Body["refresh_token"].(string)
+		if oldRT == "" {
+			t.Fatal("login missing refresh_token")
+		}
+		ref := do(t, client, http.MethodPost, cfg.BaseURL+"/auth/refresh", "", map[string]any{
+			"refresh_token": oldRT,
+		})
+		assertStatus(t, ref.StatusCode, http.StatusOK, ref)
+		newAT := assertNonEmptyString(t, ref, "access_token")
+		newRT, _ := ref.Body["refresh_token"].(string)
+		if newRT == "" || newRT == oldRT {
+			t.Fatalf("expected new refresh_token, got %q", newRT)
+		}
+		if _, err := auth.ValidateToken(newAT, getEnv("JWT_SECRET", "change-me-in-production")); err != nil {
+			t.Fatalf("new access token invalid: %v", err)
+		}
+		reuse := do(t, client, http.MethodPost, cfg.BaseURL+"/auth/refresh", "", map[string]any{
+			"refresh_token": oldRT,
+		})
+		assertStatus(t, reuse.StatusCode, http.StatusUnauthorized, reuse)
 	})
 
 	t.Run("POST /auth/login rejects wrong password", func(t *testing.T) {
@@ -426,6 +511,95 @@ func TestAPI(t *testing.T) {
 		})
 		assertStatus(t, r.StatusCode, http.StatusBadRequest, r)
 		assertKey(t, r, "error")
+	})
+
+	// ── Password reset ────────────────────────────────────────────────────────
+
+	t.Run("POST /auth/forgot-password returns 200 for unknown email", func(t *testing.T) {
+		r := do(t, client, http.MethodPost, cfg.BaseURL+"/auth/forgot-password", "", map[string]any{
+			"email": "ghost+" + runID + "@test.com",
+		})
+		assertStatus(t, r.StatusCode, http.StatusOK, r)
+		assertStringField(t, r, "message", "If an account exists for this email, you will receive reset instructions.")
+		if _, has := r.Body["reset_token"]; has {
+			t.Error("reset_token must not appear when email is unknown")
+		}
+	})
+
+	t.Run("POST /auth/reset-password updates password and login works", func(t *testing.T) {
+		if userID == "" {
+			t.Skip("userID not set")
+		}
+		secret := getEnv("JWT_SECRET", "change-me-in-production")
+		tok, err := auth.GeneratePasswordResetToken(userID, secret, 60)
+		if err != nil {
+			t.Fatalf("GeneratePasswordResetToken: %v", err)
+		}
+		newPass := "resetpass-xyz-99"
+		r := do(t, client, http.MethodPost, cfg.BaseURL+"/auth/reset-password", "", map[string]any{
+			"token":    tok,
+			"password": newPass,
+		})
+		assertStatus(t, r.StatusCode, http.StatusOK, r)
+		assertStringField(t, r, "message", "password updated successfully")
+
+		login := do(t, client, http.MethodPost, cfg.BaseURL+"/auth/login", "", map[string]any{
+			"email":    userEmail,
+			"password": newPass,
+		})
+		assertStatus(t, login.StatusCode, http.StatusOK, login)
+		// restore userPass for later subtests
+		tok2, err := auth.GeneratePasswordResetToken(userID, secret, 60)
+		if err != nil {
+			t.Fatalf("GeneratePasswordResetToken: %v", err)
+		}
+		back := do(t, client, http.MethodPost, cfg.BaseURL+"/auth/reset-password", "", map[string]any{
+			"token":    tok2,
+			"password": userPass,
+		})
+		assertStatus(t, back.StatusCode, http.StatusOK, back)
+	})
+
+	t.Run("POST /auth/reset-password rejects invalid token", func(t *testing.T) {
+		r := do(t, client, http.MethodPost, cfg.BaseURL+"/auth/reset-password", "", map[string]any{
+			"token":    "totally-not-a-reset-token",
+			"password": "validpass9",
+		})
+		assertStatus(t, r.StatusCode, http.StatusBadRequest, r)
+		assertKey(t, r, "error")
+	})
+
+	t.Run("POST /auth/reset-password rejects short password", func(t *testing.T) {
+		if userID == "" {
+			t.Skip("userID not set")
+		}
+		secret := getEnv("JWT_SECRET", "change-me-in-production")
+		tok, err := auth.GeneratePasswordResetToken(userID, secret, 60)
+		if err != nil {
+			t.Fatalf("GeneratePasswordResetToken: %v", err)
+		}
+		r := do(t, client, http.MethodPost, cfg.BaseURL+"/auth/reset-password", "", map[string]any{
+			"token":    tok,
+			"password": "short",
+		})
+		assertStatus(t, r.StatusCode, http.StatusBadRequest, r)
+		assertKey(t, r, "error")
+	})
+
+	t.Run("POST /auth/forgot-password exposes reset_token when server ENV=test", func(t *testing.T) {
+		em := email("forgot-test-env")
+		reg := do(t, client, http.MethodPost, cfg.BaseURL+"/auth/register", "", map[string]any{
+			"name": "Forgot Test", "email": em, "password": "forgotpass1",
+		})
+		assertStatus(t, reg.StatusCode, http.StatusCreated, reg)
+		r := do(t, client, http.MethodPost, cfg.BaseURL+"/auth/forgot-password", "", map[string]any{
+			"email": em,
+		})
+		assertStatus(t, r.StatusCode, http.StatusOK, r)
+		tok, ok := r.Body["reset_token"].(string)
+		if !ok || tok == "" {
+			t.Skip("reset_token not in JSON (server is not ENV=test — expected for local development HTTPS)")
+		}
 	})
 
 	// ── GET /me ───────────────────────────────────────────────────────────────

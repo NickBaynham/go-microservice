@@ -1,0 +1,28 @@
+# Override SPA build so fetches use the Docker network hostname for the API, and run Playwright in a container.
+# Usage (from repo root):
+#   docker compose -f deployments/docker-compose.e2e.yml -f deployments/docker-compose.e2e.runner.yml up --build --abort-on-container-exit playwright-runner
+
+services:
+  web-e2e:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile.frontend
+      args:
+        VITE_API_BASE_URL: http://api-e2e:8080
+
+  playwright-runner:
+    image: mcr.microsoft.com/playwright:v1.58.2-noble
+    depends_on:
+      web-e2e:
+        condition: service_started
+      api-e2e:
+        condition: service_healthy
+    working_dir: /work
+    volumes:
+      - ../frontend:/work
+    environment:
+      E2E_BASE_URL: http://web-e2e:4173
+      E2E_SKIP_WEB_SERVER: '1'
+      CI: '1'
+    command: >
+      bash -lc "npm ci && npx playwright install chromium && npx playwright test"

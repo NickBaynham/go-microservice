@@ -87,11 +87,55 @@ jobs:
         if: always()
         run: docker compose -f deployments/docker-compose.test.yml down
 
+  # ── Frontend E2E (Playwright) ───────────────────────────────────────────────
+  frontend-e2e:
+    name: Frontend E2E (Playwright)
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v6
+      - name: Start E2E stack (API + Mongo + SPA)
+        run: docker compose -f deployments/docker-compose.e2e.yml up -d --build
+        timeout-minutes: 12
+      - name: Wait for API health
+        run: |
+          for i in $(seq 1 45); do
+            curl -sf http://127.0.0.1:18080/health && exit 0
+            sleep 2
+          done
+          echo "API did not become healthy"; exit 1
+      - name: Wait for web server
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf -o /dev/null http://127.0.0.1:14173/ && exit 0
+            sleep 2
+          done
+          echo "Web did not become ready"; exit 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend deps
+        run: cd frontend && npm ci
+      - name: Install Playwright Chromium
+        run: cd frontend && npx playwright install --with-deps chromium
+      - name: Run Playwright
+        env:
+          E2E_BASE_URL: http://127.0.0.1:14173
+          E2E_SKIP_WEB_SERVER: '1'
+          E2E_API_BASE_URL: http://127.0.0.1:18080
+        run: cd frontend && npx playwright test
+      - name: Tear down E2E stack
+        if: always()
+        run: docker compose -f deployments/docker-compose.e2e.yml down -v
+
   # ── Build & Push to ECR ──────────────────────────────────────────────────────
   build:
     name: Build & Push Image
     runs-on: ubuntu-latest
-    needs: integration-tests
+    needs: [integration-tests, frontend-e2e]
     # ECR push only when you manually run this workflow on main (not on merge; avoids cost on every commit)
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     outputs:

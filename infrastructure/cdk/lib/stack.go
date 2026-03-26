@@ -29,6 +29,8 @@ type GoMicroserviceStackProps struct {
 	DesiredCount      float64
 	TaskCpu           float64
 	TaskMemory        float64
+	// CORSAllowedOrigins optional comma-separated Origins for browser SPAs (maps to CORS_ALLOWED_ORIGINS).
+	CORSAllowedOrigins string
 }
 
 // ── Stack ─────────────────────────────────────────────────────────────────────
@@ -125,19 +127,24 @@ func NewGoMicroserviceStack(scope constructs.Construct, id string, props *GoMicr
 	// App image from looked-up ECR repo (wires pull policy; avoids FromRegistry ECR warning)
 	appImageTag := ecrImageTagFromURI(props.AppImage)
 
+	appEnv := map[string]*string{
+		"PORT":             jsii.String("8080"),
+		"TLS_PORT":         jsii.String("8443"),
+		"LISTEN_HTTP":      jsii.String("true"),
+		"ENV":              jsii.String(props.Environment),
+		"MONGO_URI":        jsii.String("mongodb://localhost:27017"),
+		"MONGO_DB":         jsii.String("userservice"),
+		"JWT_EXPIRE_HOURS": jsii.String("24"),
+	}
+	if cors := strings.TrimSpace(props.CORSAllowedOrigins); cors != "" {
+		appEnv["CORS_ALLOWED_ORIGINS"] = jsii.String(cors)
+	}
+
 	// App container
 	appContainer := taskDef.AddContainer(jsii.String("app"), &awsecs.ContainerDefinitionOptions{
-		Image: awsecs.ContainerImage_FromEcrRepository(repo, jsii.String(appImageTag)),
+		Image:     awsecs.ContainerImage_FromEcrRepository(repo, jsii.String(appImageTag)),
 		Essential: jsii.Bool(true),
-		Environment: &map[string]*string{
-			"PORT":             jsii.String("8080"),
-			"TLS_PORT":         jsii.String("8443"),
-			"LISTEN_HTTP":      jsii.String("true"),
-			"ENV":              jsii.String(props.Environment),
-			"MONGO_URI":        jsii.String("mongodb://localhost:27017"),
-			"MONGO_DB":         jsii.String("userservice"),
-			"JWT_EXPIRE_HOURS": jsii.String("24"),
-		},
+		Environment: &appEnv,
 		Secrets: &map[string]awsecs.Secret{
 			"JWT_SECRET": awsecs.Secret_FromSsmParameter(jwtParam),
 		},

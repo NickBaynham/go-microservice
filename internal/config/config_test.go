@@ -9,12 +9,38 @@ import (
 
 func TestLoad_Defaults(t *testing.T) {
 	// Ensure no env vars interfere
-	unset := []string{"PORT", "TLS_PORT", "MONGO_URI", "MONGO_DB", "JWT_SECRET", "JWT_EXPIRE_HOURS", "ENV", "TLS_CERT", "TLS_KEY"}
+	unset := []string{
+		"PORT", "TLS_PORT", "MONGO_URI", "MONGO_DB", "JWT_SECRET", "JWT_EXPIRE_HOURS", "JWT_ACCESS_EXPIRE_MINUTES", "JWT_REFRESH_EXPIRE_HOURS", "ENV", "TLS_CERT", "TLS_KEY",
+		"PASSWORD_RESET_FRONTEND_URL", "PASSWORD_RESET_TOKEN_MINUTES",
+		"SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASSWORD", "SMTP_FROM",
+		"LOG_LEVEL", "LOG_JSON", "METRICS_ENABLED",
+		"EMAIL_VERIFICATION_REQUIRED", "EMAIL_VERIFICATION_FRONTEND_URL", "EMAIL_VERIFICATION_TOKEN_MINUTES",
+	}
 	for _, k := range unset {
 		os.Unsetenv(k)
 	}
 
 	cfg := config.Load()
+
+	if cfg.EmailVerificationRequired {
+		t.Error("EmailVerificationRequired: want false by default")
+	}
+	if cfg.LogJSON {
+		t.Error("LogJSON: want false in development by default")
+	}
+	if !cfg.MetricsEnabled {
+		t.Error("MetricsEnabled: want true by default")
+	}
+	if cfg.LogLevel != "info" {
+		t.Errorf("LogLevel: got %q, want info", cfg.LogLevel)
+	}
+
+	if cfg.JWTAccessExpireMinutes != 15 {
+		t.Errorf("JWTAccessExpireMinutes: got %d, want 15 (default when JWT_ACCESS_EXPIRE_MINUTES unset)", cfg.JWTAccessExpireMinutes)
+	}
+	if cfg.JWTRefreshExpireHours != 720 {
+		t.Errorf("JWTRefreshExpireHours: got %d, want 720", cfg.JWTRefreshExpireHours)
+	}
 
 	tests := []struct {
 		name string
@@ -29,6 +55,7 @@ func TestLoad_Defaults(t *testing.T) {
 		{"Env", cfg.Env, "development"},
 		{"TLSCert", cfg.TLSCert, ""},
 		{"TLSKey", cfg.TLSKey, ""},
+		{"PasswordResetFrontendURL", cfg.PasswordResetFrontendURL, "http://localhost:5173/reset-password"},
 	}
 
 	for _, tt := range tests {
@@ -41,7 +68,13 @@ func TestLoad_Defaults(t *testing.T) {
 }
 
 func TestLoad_InvalidJWTExpireHours_DevelopmentFallsBackTo24(t *testing.T) {
-	unset := []string{"PORT", "TLS_PORT", "MONGO_URI", "MONGO_DB", "JWT_SECRET", "JWT_EXPIRE_HOURS", "ENV", "TLS_CERT", "TLS_KEY"}
+	unset := []string{
+		"PORT", "TLS_PORT", "MONGO_URI", "MONGO_DB", "JWT_SECRET", "JWT_EXPIRE_HOURS", "JWT_ACCESS_EXPIRE_MINUTES", "JWT_REFRESH_EXPIRE_HOURS", "ENV", "TLS_CERT", "TLS_KEY",
+		"PASSWORD_RESET_FRONTEND_URL", "PASSWORD_RESET_TOKEN_MINUTES",
+		"SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASSWORD", "SMTP_FROM",
+		"LOG_LEVEL", "LOG_JSON", "METRICS_ENABLED",
+		"EMAIL_VERIFICATION_REQUIRED", "EMAIL_VERIFICATION_FRONTEND_URL", "EMAIL_VERIFICATION_TOKEN_MINUTES",
+	}
 	for _, k := range unset {
 		os.Unsetenv(k)
 	}
@@ -51,6 +84,9 @@ func TestLoad_InvalidJWTExpireHours_DevelopmentFallsBackTo24(t *testing.T) {
 	cfg := config.Load()
 	if cfg.JWTExpireHours != "24" {
 		t.Errorf("JWTExpireHours: got %q, want 24", cfg.JWTExpireHours)
+	}
+	if cfg.JWTAccessExpireMinutes != 15 {
+		t.Errorf("JWTAccessExpireMinutes: got %d, want 15 when JWT_EXPIRE_HOURS invalid and JWT_ACCESS unset", cfg.JWTAccessExpireMinutes)
 	}
 }
 
@@ -65,12 +101,25 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 	os.Setenv("TLS_CERT", "/certs/cert.pem")
 	os.Setenv("TLS_KEY", "/certs/key.pem")
 	defer func() {
-		for _, k := range []string{"PORT", "TLS_PORT", "MONGO_URI", "MONGO_DB", "JWT_SECRET", "JWT_EXPIRE_HOURS", "ENV", "TLS_CERT", "TLS_KEY"} {
+		for _, k := range []string{
+			"PORT", "TLS_PORT", "MONGO_URI", "MONGO_DB", "JWT_SECRET", "JWT_EXPIRE_HOURS", "JWT_ACCESS_EXPIRE_MINUTES", "JWT_REFRESH_EXPIRE_HOURS", "ENV", "TLS_CERT", "TLS_KEY",
+			"PASSWORD_RESET_FRONTEND_URL", "PASSWORD_RESET_TOKEN_MINUTES",
+			"SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASSWORD", "SMTP_FROM",
+			"LOG_LEVEL", "LOG_JSON", "METRICS_ENABLED",
+			"EMAIL_VERIFICATION_REQUIRED", "EMAIL_VERIFICATION_FRONTEND_URL", "EMAIL_VERIFICATION_TOKEN_MINUTES",
+		} {
 			os.Unsetenv(k)
 		}
 	}()
 
 	cfg := config.Load()
+
+	if !cfg.LogJSON {
+		t.Error("LogJSON: want true by default in production when LOG_JSON unset")
+	}
+	if cfg.JWTAccessExpireMinutes != 48*60 {
+		t.Errorf("JWTAccessExpireMinutes: got %d, want %d from JWT_EXPIRE_HOURS=48", cfg.JWTAccessExpireMinutes, 48*60)
+	}
 
 	tests := []struct {
 		name string

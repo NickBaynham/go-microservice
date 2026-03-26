@@ -32,6 +32,10 @@ type Config struct {
 	EmailVerificationFrontendURL  string
 	EmailVerificationTokenMinutes int
 
+	// Pending email change: PUT /users/:id with a new email sets pending_email and emails a confirm link. Production requires SMTP and EMAIL_CHANGE_FRONTEND_URL.
+	EmailChangeFrontendURL  string
+	EmailChangeTokenMinutes int
+
 	SMTPHost     string
 	SMTPPort     string
 	SMTPUser     string
@@ -50,6 +54,13 @@ type Config struct {
 	LogLevel       string // debug | info | warn | error
 	LogJSON        bool   // JSON logs (default on in production/prod unless LOG_JSON overrides)
 	MetricsEnabled bool   // expose GET /metrics for scraping (default true)
+
+	// Abuse / safety — Cloudflare Turnstile on register & login when TURNSTILE_SECRET_KEY is set.
+	TurnstileSecretKey string
+
+	// Per-account login lockout after failed password attempts (Mongo-backed). Zero max attempts disables.
+	FailedLoginMaxAttempts    int
+	FailedLoginLockoutMinutes int
 }
 
 // IsProduction reports whether the app runs in a live production profile.
@@ -141,12 +152,51 @@ func Load() *Config {
 		evTokMin = 10080
 	}
 
+	ecFront := strings.TrimSpace(getEnv("EMAIL_CHANGE_FRONTEND_URL", ""))
+	if ecFront == "" && !isProductionLike(env) {
+		ecFront = "http://localhost:5173/confirm-email-change"
+	}
+	ecTokMin := getEnvInt("EMAIL_CHANGE_TOKEN_MINUTES", 1440)
+	if ecTokMin < 1 {
+		ecTokMin = 1
+	}
+	if ecTokMin > 10080 {
+		ecTokMin = 10080
+	}
+
 	logJSON := isProductionLike(env)
 	if v := strings.TrimSpace(os.Getenv("LOG_JSON")); v != "" {
 		logJSON = parseEnvBoolDefault(v, logJSON)
 	}
 	logLevel := strings.TrimSpace(getEnv("LOG_LEVEL", "info"))
 	metricsEnabled := parseEnvBoolDefault(os.Getenv("METRICS_ENABLED"), true)
+
+	turnstileSecret := strings.TrimSpace(getEnv("TURNSTILE_SECRET_KEY", ""))
+
+	lockMax := 5
+	if s := strings.TrimSpace(os.Getenv("LOGIN_LOCKOUT_MAX_ATTEMPTS")); s != "" {
+		if v, err := strconv.Atoi(s); err == nil {
+			lockMax = v
+		}
+	}
+	if lockMax < 0 {
+		lockMax = 0
+	}
+	if lockMax > 100 {
+		lockMax = 100
+	}
+	lockMin := 15
+	if s := strings.TrimSpace(os.Getenv("LOGIN_LOCKOUT_MINUTES")); s != "" {
+		if v, err := strconv.Atoi(s); err == nil {
+			lockMin = v
+		}
+	}
+	if lockMin < 1 {
+		lockMin = 1
+	}
+	if lockMin > 10080 {
+		lockMin = 10080
+	}
 
 	return &Config{
 		Port:                      getEnv("PORT", "8080"),
@@ -162,6 +212,8 @@ func Load() *Config {
 		EmailVerificationRequired:     evRequired,
 		EmailVerificationFrontendURL:  evFront,
 		EmailVerificationTokenMinutes: evTokMin,
+		EmailChangeFrontendURL:        ecFront,
+		EmailChangeTokenMinutes:       ecTokMin,
 		SMTPHost:                      getEnv("SMTP_HOST", ""),
 		SMTPPort:                  getEnv("SMTP_PORT", ""),
 		SMTPUser:                  getEnv("SMTP_USER", ""),
@@ -174,7 +226,20 @@ func Load() *Config {
 		LogLevel:                  logLevel,
 		LogJSON:                   logJSON,
 		MetricsEnabled:            metricsEnabled,
+		TurnstileSecretKey:        turnstileSecret,
+		FailedLoginMaxAttempts:    lockMax,
+		FailedLoginLockoutMinutes: lockMin,
 	}
+}
+
+// TurnstileEnabled is true when server-side Turnstile verification should run on register/login.
+func (c *Config) TurnstileEnabled() bool {
+	return strings.TrimSpace(c.TurnstileSecretKey) != ""
+}
+
+// LoginLockoutEnabled is true when failed password attempts trigger a temporary account lockout.
+func (c *Config) LoginLockoutEnabled() bool {
+	return c.FailedLoginMaxAttempts > 0 && c.FailedLoginLockoutMinutes > 0
 }
 
 // CORSAllowedOriginsFromEnv parses a comma-separated CORS_ALLOWED_ORIGINS value.

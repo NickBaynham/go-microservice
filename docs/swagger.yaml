@@ -1,5 +1,14 @@
 basePath: /
 definitions:
+  go-microservice_internal_models.ConfirmEmailChangeRequest:
+    description: Confirm email change body
+    properties:
+      token:
+        example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+        type: string
+    required:
+    - token
+    type: object
   go-microservice_internal_models.CreateUserRequest:
     description: Registration request body
     properties:
@@ -13,6 +22,9 @@ definitions:
       password:
         example: securepassword
         minLength: 8
+        type: string
+      turnstile_token:
+        example: turnstile-response-token
         type: string
     required:
     - email
@@ -80,6 +92,9 @@ definitions:
         type: string
       password:
         example: securepassword
+        type: string
+      turnstile_token:
+        example: turnstile-response-token
         type: string
     required:
     - email
@@ -200,6 +215,9 @@ definitions:
       name:
         example: Alice Smith
         type: string
+      pending_email:
+        example: pending@example.com
+        type: string
       role:
         example: user
         type: string
@@ -228,6 +246,41 @@ info:
   title: go-microservice API
   version: "1.0"
 paths:
+  /auth/confirm-email-change:
+    post:
+      consumes:
+      - application/json
+      description: Applies a new email after the user follows the link sent to the
+        pending address. Invalidates refresh sessions.
+      parameters:
+      - description: Token from the email change message
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/go-microservice_internal_models.ConfirmEmailChangeRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.MessageResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "409":
+          description: New email already in use
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+      summary: Confirm pending email change
+      tags:
+      - auth
   /auth/forgot-password:
     post:
       consumes:
@@ -285,7 +338,7 @@ paths:
           schema:
             $ref: '#/definitions/go-microservice_internal_models.LoginResponse'
         "400":
-          description: Validation error
+          description: Captcha failed when Turnstile is configured
           schema:
             $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
         "401":
@@ -294,6 +347,10 @@ paths:
             $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
         "403":
           description: Email not verified (when verification is required)
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "429":
+          description: Account temporarily locked after failed logins
           schema:
             $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
         "500":
@@ -392,7 +449,7 @@ paths:
           schema:
             $ref: '#/definitions/go-microservice_internal_models.RegisterResponse'
         "400":
-          description: Validation error
+          description: Validation error or captcha failed when Turnstile is configured
           schema:
             $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
         "409":
@@ -553,6 +610,63 @@ paths:
       summary: Get current user
       tags:
       - users
+  /me/cancel-email-change:
+    post:
+      description: Clears pending_email without changing the login address.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.User'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Cancel pending email change
+      tags:
+      - users
+  /me/resend-email-change:
+    post:
+      consumes:
+      - application/json
+      description: Sends another confirmation link to the pending address when one
+        is set.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.MessageResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Resend email change confirmation
+      tags:
+      - users
   /users:
     get:
       description: Returns all users in the system. Admin only.
@@ -653,7 +767,9 @@ paths:
       consumes:
       - application/json
       description: Updates a user's profile. Users can update themselves; admins can
-        update anyone and change roles.
+        update anyone and change roles. Changing `email` stages the new address in
+        `pending_email` and sends a confirmation link to that address; the login email
+        stays the same until POST /auth/confirm-email-change succeeds.
       parameters:
       - description: User ID
         in: path
@@ -687,6 +803,14 @@ paths:
             $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
         "404":
           description: User not found
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "409":
+          description: Email already taken
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "503":
+          description: Production email change not configured
           schema:
             $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
       security:

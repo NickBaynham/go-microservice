@@ -12,6 +12,7 @@ export type User = {
   id?: string
   name: string
   email: string
+  pending_email?: string
   role: string
   email_verified?: boolean
   created_at?: string
@@ -22,6 +23,7 @@ export async function registerUser(body: {
   name: string
   email: string
   password: string
+  turnstile_token?: string
 }): Promise<{ message: string; user: User }> {
   const res = await fetch(`${apiBase()}/auth/register`, {
     method: 'POST',
@@ -64,11 +66,16 @@ export async function resendVerification(email: string): Promise<{ message: stri
 export async function loginUser(
   email: string,
   password: string,
+  turnstileToken?: string,
 ): Promise<{ token: string; user: User }> {
   const res = await fetch(`${apiBase()}/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({
+      email,
+      password,
+      ...(turnstileToken ? { turnstile_token: turnstileToken } : {}),
+    }),
   })
   const data = (await res.json()) as {
     token?: string
@@ -180,4 +187,59 @@ export async function resetPassword(token: string, password: string): Promise<{ 
     throw new Error(data.error ?? `reset-password failed (${res.status})`)
   }
   return { message: data.message ?? '' }
+}
+
+export async function confirmEmailChange(token: string): Promise<{ message: string }> {
+  const res = await fetch(`${apiBase()}/auth/confirm-email-change`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token }),
+  })
+  const data = (await res.json()) as { message?: string; error?: string }
+  if (!res.ok) {
+    throw new Error(data.error ?? `confirm-email-change failed (${res.status})`)
+  }
+  return { message: data.message ?? '' }
+}
+
+async function postWithAuth(path: string, jsonBody?: object): Promise<Response> {
+  let token = getToken()
+  if (!token) {
+    throw new Error('not authenticated')
+  }
+  const run = (t: string) =>
+    fetch(`${apiBase()}${path}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${t}`,
+        ...(jsonBody !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      },
+      body: jsonBody !== undefined ? JSON.stringify(jsonBody) : undefined,
+    })
+  let res = await run(token)
+  if (res.status === 401) {
+    const t2 = await refreshSession()
+    if (t2) {
+      res = await run(t2)
+    }
+  }
+  return res
+}
+
+export async function resendEmailChange(): Promise<{ message: string }> {
+  const res = await postWithAuth('/me/resend-email-change')
+  const data = (await res.json()) as { message?: string; error?: string }
+  if (!res.ok) {
+    throw new Error(data.error ?? `resend-email-change failed (${res.status})`)
+  }
+  return { message: data.message ?? '' }
+}
+
+export async function cancelEmailChange(): Promise<User> {
+  const res = await postWithAuth('/me/cancel-email-change')
+  const data = (await res.json()) as User & ApiError
+  if (!res.ok) {
+    throw new Error(data.error ?? `cancel-email-change failed (${res.status})`)
+  }
+  return data as User
 }

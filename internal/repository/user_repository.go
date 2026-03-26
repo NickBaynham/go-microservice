@@ -110,6 +110,54 @@ func (r *UserRepository) Update(ctx context.Context, id string, update bson.M) (
 	return &user, err
 }
 
+// IncrementFailedLogin increments failed_login_attempts and sets locked_until when attempts reach maxAttempts.
+func (r *UserRepository) IncrementFailedLogin(ctx context.Context, id string, maxAttempts int, lockout time.Duration) error {
+	oid, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return errors.New("invalid user id")
+	}
+	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
+	var user models.User
+	err = r.col.FindOneAndUpdate(ctx,
+		bson.M{"_id": oid},
+		bson.M{
+			"$inc": bson.M{"failed_login_attempts": 1},
+			"$set": bson.M{"updated_at": time.Now()},
+		},
+		opts,
+	).Decode(&user)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return errors.New("user not found")
+	}
+	if err != nil {
+		return err
+	}
+	if maxAttempts > 0 && user.FailedLoginAttempts >= maxAttempts {
+		until := time.Now().Add(lockout)
+		_, err = r.col.UpdateOne(ctx, bson.M{"_id": oid}, bson.M{
+			"$set": bson.M{"locked_until": until, "updated_at": time.Now()},
+		})
+		return err
+	}
+	return nil
+}
+
+// ClearLoginLockout resets failed-login state after a successful login or password reset.
+func (r *UserRepository) ClearLoginLockout(ctx context.Context, id string) error {
+	oid, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return errors.New("invalid user id")
+	}
+	_, err = r.col.UpdateOne(ctx, bson.M{"_id": oid}, bson.M{
+		"$set": bson.M{
+			"failed_login_attempts": 0,
+			"updated_at":            time.Now(),
+		},
+		"$unset": bson.M{"locked_until": ""},
+	})
+	return err
+}
+
 func (r *UserRepository) Delete(ctx context.Context, id string) error {
 	oid, err := primitive.ObjectIDFromHex(id)
 	if err != nil {

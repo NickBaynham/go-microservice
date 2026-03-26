@@ -8,8 +8,19 @@ import (
 	"go-microservice/internal/observability"
 )
 
+func truncateUARunes(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
+}
+
 // AccessLog emits one structured log line per request after it completes, including request_id,
-// user_id when the route ran behind AuthRequired, method, matched route pattern, status, duration, and client IP.
+// user_id when the route ran behind AuthRequired, method, matched route pattern, status, duration, client IP, and user-agent (truncated).
 func AccessLog(log *slog.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
@@ -28,12 +39,14 @@ func AccessLog(log *slog.Logger) gin.HandlerFunc {
 			level = slog.LevelWarn
 		}
 
+		ua := truncateUARunes(c.Request.UserAgent(), 512)
 		attrs := []slog.Attr{
 			slog.String("method", c.Request.Method),
 			slog.String("path", route),
 			slog.Int("status", status),
 			slog.Duration("duration", time.Since(start)),
 			slog.String("client_ip", c.ClientIP()),
+			slog.String("user_agent", ua),
 		}
 		if rid, ok := c.Get(observability.RequestIDKey); ok {
 			if s, ok := rid.(string); ok && s != "" {

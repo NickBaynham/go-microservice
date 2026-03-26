@@ -144,12 +144,15 @@ func main() {
 	r.POST("/auth/reset-password", resetLimit, userHandler.ResetPassword)
 	r.POST("/auth/verify-email", resetLimit, userHandler.VerifyEmail)
 	r.POST("/auth/resend-verification", resendVerifyLimit, userHandler.ResendVerification)
+	r.POST("/auth/confirm-email-change", resetLimit, userHandler.ConfirmEmailChange)
 
 	// Protected routes
 	protected := r.Group("/")
 	protected.Use(middleware.AuthRequired(cfg.JWTSecret))
 	{
 		protected.GET("/me", userHandler.GetMe)
+		protected.POST("/me/resend-email-change", resendVerifyLimit, userHandler.ResendEmailChange)
+		protected.POST("/me/cancel-email-change", userHandler.CancelEmailChange)
 		protected.PUT("/users/:id", userHandler.UpdateUser)
 
 		// Admin-only routes

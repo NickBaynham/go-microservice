@@ -38,6 +38,8 @@ func testConfig() *config.Config {
 		Env:                       "development",
 		PasswordResetFrontendURL:  "http://localhost:5173/reset-password",
 		PasswordResetTokenMinutes: 60,
+		EmailChangeFrontendURL:    "http://localhost:5173/confirm-email-change",
+		EmailChangeTokenMinutes:   60,
 	}
 }
 
@@ -188,6 +190,9 @@ func (m *mockUserStore) Update(ctx context.Context, id string, update bson.M) (*
 		return nil, errNotFound
 	}
 
+	if v, ok := update["pending_email"].(string); ok {
+		u.PendingEmail = v
+	}
 	newEmail := u.Email
 	if v, ok := update["email"].(string); ok {
 		newEmail = v
@@ -212,8 +217,52 @@ func (m *mockUserStore) Update(ctx context.Context, id string, update bson.M) (*
 	if v, ok := update["email_verified"].(bool); ok {
 		u.EmailVerified = v
 	}
+	switch v := update["failed_login_attempts"].(type) {
+	case int:
+		u.FailedLoginAttempts = v
+	case int32:
+		u.FailedLoginAttempts = int(v)
+	case int64:
+		u.FailedLoginAttempts = int(v)
+	}
+	if v, ok := update["locked_until"].(*time.Time); ok {
+		u.LockedUntil = v
+	}
 	m.users[idx] = *u
 	return u, nil
+}
+
+func (m *mockUserStore) IncrementFailedLogin(_ context.Context, userID string, maxAttempts int, lockout time.Duration) error {
+	u, err := m.FindByID(context.Background(), userID)
+	if err != nil {
+		return err
+	}
+	idx := m.userIndexByID(u.ID)
+	if idx < 0 {
+		return errNotFound
+	}
+	u.FailedLoginAttempts++
+	if maxAttempts > 0 && u.FailedLoginAttempts >= maxAttempts {
+		t := time.Now().Add(lockout)
+		u.LockedUntil = &t
+	}
+	m.users[idx] = *u
+	return nil
+}
+
+func (m *mockUserStore) ClearLoginLockout(_ context.Context, userID string) error {
+	u, err := m.FindByID(context.Background(), userID)
+	if err != nil {
+		return err
+	}
+	idx := m.userIndexByID(u.ID)
+	if idx < 0 {
+		return errNotFound
+	}
+	u.FailedLoginAttempts = 0
+	u.LockedUntil = nil
+	m.users[idx] = *u
+	return nil
 }
 
 func (m *mockUserStore) Delete(ctx context.Context, id string) error {
@@ -709,6 +758,155 @@ func TestUpdateUser_DuplicateEmail(t *testing.T) {
 	}
 }
 
+func TestUpdateUser_EmailChange_SetsPendingAndSendsMail(t *testing.T) {
+	store := newMockStore()
+	rec := &recordingMailer{}
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), rec)
+	u := registerUser(t, h, "Self", "self@example.com", "password12")
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("userID", u.ID.Hex())
+	c.Set("role", "user")
+	c.Params = gin.Params{{Key: "id", Value: u.ID.Hex()}}
+	c.Request = httptest.NewRequest(http.MethodPut, "/users/"+u.ID.Hex(), bytes.NewReader([]byte(`{"email":"NEW@example.com"}`)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.UpdateUser(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	var got models.User
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Email != "self@example.com" {
+		t.Errorf("login email: got %q, want unchanged", got.Email)
+	}
+	if got.PendingEmail != "new@example.com" {
+		t.Errorf("pending_email: got %q", got.PendingEmail)
+	}
+	if rec.lastChangeTo != "new@example.com" || rec.lastChangeURL == "" {
+		t.Fatalf("mailer: to=%q url=%q", rec.lastChangeTo, rec.lastChangeURL)
+	}
+	uu, err := url.Parse(rec.lastChangeURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok := uu.Query().Get("token")
+	if tok == "" {
+		t.Fatal("missing token in mail URL")
+	}
+
+	w2 := httptest.NewRecorder()
+	c2, _ := gin.CreateTestContext(w2)
+	c2.Request = httptest.NewRequest(http.MethodPost, "/auth/confirm-email-change", bytes.NewReader([]byte(`{"token":"`+tok+`"}`)))
+	c2.Request.Header.Set("Content-Type", "application/json")
+	h.ConfirmEmailChange(c2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("confirm status %d: %s", w2.Code, w2.Body.String())
+	}
+	final, err := store.FindByID(context.Background(), u.ID.Hex())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.Email != "new@example.com" || final.PendingEmail != "" {
+		t.Fatalf("after confirm: email=%q pending=%q", final.Email, final.PendingEmail)
+	}
+	if !final.EmailVerified {
+		t.Error("want email_verified true after confirm")
+	}
+}
+
+func TestUpdateUser_EmailChange_Production_NotConfigured_503(t *testing.T) {
+	store := newMockStore()
+	cfg := testConfig()
+	cfg.Env = "production"
+	cfg.EmailChangeFrontendURL = ""
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), cfg, &recordingMailer{})
+	u := registerUser(t, h, "Self", "self@example.com", "password12")
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("userID", u.ID.Hex())
+	c.Set("role", "user")
+	c.Params = gin.Params{{Key: "id", Value: u.ID.Hex()}}
+	c.Request = httptest.NewRequest(http.MethodPut, "/users/"+u.ID.Hex(), bytes.NewReader([]byte(`{"email":"other@example.com"}`)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.UpdateUser(c)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestConfirmEmailChange_NoPending_400(t *testing.T) {
+	store := newMockStore()
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), nil)
+	u := registerUser(t, h, "Self", "self@example.com", "password12")
+	tok, err := auth.GenerateEmailChangeToken(u.ID.Hex(), "ghost@example.com", testJWTSecret, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/auth/confirm-email-change", bytes.NewReader([]byte(`{"token":"`+tok+`"}`)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.ConfirmEmailChange(c)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestCancelEmailChange_ClearsPending(t *testing.T) {
+	store := newMockStore()
+	rec := &recordingMailer{}
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), rec)
+	u := registerUser(t, h, "Self", "self@example.com", "password12")
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("userID", u.ID.Hex())
+	c.Set("role", "user")
+	c.Params = gin.Params{{Key: "id", Value: u.ID.Hex()}}
+	c.Request = httptest.NewRequest(http.MethodPut, "/users/"+u.ID.Hex(), bytes.NewReader([]byte(`{"email":"pending@example.com"}`)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.UpdateUser(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("update %d: %s", w.Code, w.Body.String())
+	}
+
+	w2 := httptest.NewRecorder()
+	c2, _ := gin.CreateTestContext(w2)
+	c2.Set("userID", u.ID.Hex())
+	c2.Request = httptest.NewRequest(http.MethodPost, "/me/cancel-email-change", nil)
+	h.CancelEmailChange(c2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("cancel %d: %s", w2.Code, w2.Body.String())
+	}
+	var got models.User
+	if err := json.Unmarshal(w2.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.PendingEmail != "" {
+		t.Errorf("pending: got %q", got.PendingEmail)
+	}
+}
+
+func TestResendEmailChange_NoPending_400(t *testing.T) {
+	store := newMockStore()
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), &recordingMailer{})
+	u := registerUser(t, h, "Self", "self@example.com", "password12")
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("userID", u.ID.Hex())
+	c.Request = httptest.NewRequest(http.MethodPost, "/me/resend-email-change", nil)
+	h.ResendEmailChange(c)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestUpdateUser_NoFields(t *testing.T) {
 	store := newMockStore()
 	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), nil)
@@ -763,8 +961,11 @@ type recordingMailer struct {
 	lastURL        string
 	lastVerifyTo   string
 	lastVerifyURL  string
+	lastChangeTo   string
+	lastChangeURL  string
 	sendErr        error
 	verifySendErr  error
+	changeSendErr  error
 }
 
 func (r *recordingMailer) SendPasswordReset(_ context.Context, to, resetURL string) error {
@@ -782,6 +983,15 @@ func (r *recordingMailer) SendEmailVerification(_ context.Context, to, verifyURL
 	}
 	r.lastVerifyTo = to
 	r.lastVerifyURL = verifyURL
+	return nil
+}
+
+func (r *recordingMailer) SendEmailChange(_ context.Context, to, confirmURL string) error {
+	if r.changeSendErr != nil {
+		return r.changeSendErr
+	}
+	r.lastChangeTo = to
+	r.lastChangeURL = confirmURL
 	return nil
 }
 
@@ -991,6 +1201,39 @@ func TestRegister_EmailVerificationRequired_SendsVerificationMail(t *testing.T) 
 	}
 	if resp.User.EmailVerified {
 		t.Error("expected email_verified false before verification")
+	}
+}
+
+func TestLogin_AccountLocked_AfterFailedAttempts(t *testing.T) {
+	store := newMockStore()
+	cfg := testConfig()
+	cfg.FailedLoginMaxAttempts = 3
+	cfg.FailedLoginLockoutMinutes = 15
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), cfg, nil)
+	registerUser(t, h, "Alice", "a@example.com", "password12")
+
+	for i := 0; i < 3; i++ {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewReader([]byte(
+			`{"email":"a@example.com","password":"wrongpass"}`,
+		)))
+		c.Request.Header.Set("Content-Type", "application/json")
+		h.Login(c)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("failed attempt %d: want 401 got %d %s", i, w.Code, w.Body.String())
+		}
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewReader([]byte(
+		`{"email":"a@example.com","password":"password12"}`,
+	)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.Login(c)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("correct password while locked: want 429 got %d %s", w.Code, w.Body.String())
 	}
 }
 

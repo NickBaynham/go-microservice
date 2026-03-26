@@ -12,19 +12,24 @@ type User struct {
 	ID             primitive.ObjectID `bson:"_id,omitempty" json:"id,omitempty"  example:"64b1f9e2c3d4e5f6a7b8c9d0"`
 	Name           string             `bson:"name"          json:"name"          example:"Alice Smith"`
 	Email          string             `bson:"email"         json:"email"         example:"alice@example.com"`
+	PendingEmail   string             `bson:"pending_email,omitempty" json:"pending_email,omitempty" example:"pending@example.com"`
 	Password       string             `bson:"password"      json:"-"`
 	Role           string             `bson:"role"          json:"role"          example:"user"`
 	EmailVerified bool               `bson:"email_verified"  json:"email_verified"  example:"true"`
-	CreatedAt     time.Time          `bson:"created_at"    json:"created_at"    example:"2024-01-01T00:00:00Z"`
-	UpdatedAt     time.Time          `bson:"updated_at"    json:"updated_at"    example:"2024-01-01T00:00:00Z"`
+	// FailedLoginAttempts and LockedUntil are used for brute-force protection (not exposed in JSON API).
+	FailedLoginAttempts int        `bson:"failed_login_attempts,omitempty" json:"-"`
+	LockedUntil         *time.Time `bson:"locked_until,omitempty"          json:"-"`
+	CreatedAt           time.Time  `bson:"created_at"    json:"created_at"    example:"2024-01-01T00:00:00Z"`
+	UpdatedAt           time.Time  `bson:"updated_at"    json:"updated_at"    example:"2024-01-01T00:00:00Z"`
 }
 
 // CreateUserRequest is the payload for registering a new user
 // @Description Registration request body
 type CreateUserRequest struct {
-	Name     string `json:"name"     binding:"required,min=2" example:"Alice Smith"`
-	Email    string `json:"email"    binding:"required,email" example:"alice@example.com"`
-	Password string `json:"password" binding:"required,min=8" example:"securepassword"`
+	Name            string `json:"name"             binding:"required,min=2" example:"Alice Smith"`
+	Email           string `json:"email"            binding:"required,email" example:"alice@example.com"`
+	Password        string `json:"password"         binding:"required,min=8" example:"securepassword"`
+	TurnstileToken  string `json:"turnstile_token"  example:"turnstile-response-token"`
 }
 
 // UpdateUserRequest is the payload for updating a user
@@ -38,8 +43,9 @@ type UpdateUserRequest struct {
 // LoginRequest is the payload for authenticating a user
 // @Description Login request body
 type LoginRequest struct {
-	Email    string `json:"email"    binding:"required,email" example:"alice@example.com"`
-	Password string `json:"password" binding:"required"        example:"securepassword"`
+	Email          string `json:"email"            binding:"required,email" example:"alice@example.com"`
+	Password       string `json:"password"         binding:"required"        example:"securepassword"`
+	TurnstileToken string `json:"turnstile_token"  example:"turnstile-response-token"`
 }
 
 // LoginResponse is returned on successful login
@@ -106,6 +112,12 @@ type RegisterResponse struct {
 // VerifyEmailRequest completes email verification using the token from the signup email.
 // @Description Email verification body
 type VerifyEmailRequest struct {
+	Token string `json:"token" binding:"required" example:"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."`
+}
+
+// ConfirmEmailChangeRequest completes a pending email change using the link sent to the new address.
+// @Description Confirm email change body
+type ConfirmEmailChangeRequest struct {
 	Token string `json:"token" binding:"required" example:"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."`
 }
 

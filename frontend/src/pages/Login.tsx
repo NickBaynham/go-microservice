@@ -1,6 +1,8 @@
 import { FormEvent, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { loginUser } from '../api'
+import TurnstileField from '../components/TurnstileField'
+import { turnstileSiteKey } from '../envPublic'
 
 export default function Login() {
   const nav = useNavigate()
@@ -9,15 +11,20 @@ export default function Login() {
   }
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [turnstileToken, setTurnstileToken] = useState('')
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault()
     setErr(null)
+    if (turnstileSiteKey() && !turnstileToken) {
+      setErr('Complete the verification challenge.')
+      return
+    }
     setBusy(true)
     try {
-      await loginUser(email, password)
+      await loginUser(email, password, turnstileToken || undefined)
       nav('/account', { replace: true })
     } catch (x) {
       setErr(x instanceof Error ? x.message : 'login failed')
@@ -69,6 +76,7 @@ export default function Login() {
             data-testid="login-password"
           />
         </label>
+        <TurnstileField onToken={setTurnstileToken} />
         <button type="submit" disabled={busy} data-testid="login-submit">
           {busy ? 'Signing in…' : 'Sign in'}
         </button>

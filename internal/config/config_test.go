@@ -15,6 +15,8 @@ func TestLoad_Defaults(t *testing.T) {
 		"SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASSWORD", "SMTP_FROM",
 		"LOG_LEVEL", "LOG_JSON", "METRICS_ENABLED",
 		"EMAIL_VERIFICATION_REQUIRED", "EMAIL_VERIFICATION_FRONTEND_URL", "EMAIL_VERIFICATION_TOKEN_MINUTES",
+		"EMAIL_CHANGE_FRONTEND_URL", "EMAIL_CHANGE_TOKEN_MINUTES",
+		"TURNSTILE_SECRET_KEY", "LOGIN_LOCKOUT_MAX_ATTEMPTS", "LOGIN_LOCKOUT_MINUTES",
 	}
 	for _, k := range unset {
 		os.Unsetenv(k)
@@ -24,6 +26,15 @@ func TestLoad_Defaults(t *testing.T) {
 
 	if cfg.EmailVerificationRequired {
 		t.Error("EmailVerificationRequired: want false by default")
+	}
+	if cfg.TurnstileSecretKey != "" {
+		t.Errorf("TurnstileSecretKey: want empty by default, got %q", cfg.TurnstileSecretKey)
+	}
+	if cfg.FailedLoginMaxAttempts != 5 {
+		t.Errorf("FailedLoginMaxAttempts: got %d, want 5", cfg.FailedLoginMaxAttempts)
+	}
+	if cfg.FailedLoginLockoutMinutes != 15 {
+		t.Errorf("FailedLoginLockoutMinutes: got %d, want 15", cfg.FailedLoginLockoutMinutes)
 	}
 	if cfg.LogJSON {
 		t.Error("LogJSON: want false in development by default")
@@ -56,6 +67,7 @@ func TestLoad_Defaults(t *testing.T) {
 		{"TLSCert", cfg.TLSCert, ""},
 		{"TLSKey", cfg.TLSKey, ""},
 		{"PasswordResetFrontendURL", cfg.PasswordResetFrontendURL, "http://localhost:5173/reset-password"},
+		{"EmailChangeFrontendURL", cfg.EmailChangeFrontendURL, "http://localhost:5173/confirm-email-change"},
 	}
 
 	for _, tt := range tests {
@@ -74,6 +86,8 @@ func TestLoad_InvalidJWTExpireHours_DevelopmentFallsBackTo24(t *testing.T) {
 		"SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASSWORD", "SMTP_FROM",
 		"LOG_LEVEL", "LOG_JSON", "METRICS_ENABLED",
 		"EMAIL_VERIFICATION_REQUIRED", "EMAIL_VERIFICATION_FRONTEND_URL", "EMAIL_VERIFICATION_TOKEN_MINUTES",
+		"EMAIL_CHANGE_FRONTEND_URL", "EMAIL_CHANGE_TOKEN_MINUTES",
+		"TURNSTILE_SECRET_KEY", "LOGIN_LOCKOUT_MAX_ATTEMPTS", "LOGIN_LOCKOUT_MINUTES",
 	}
 	for _, k := range unset {
 		os.Unsetenv(k)
@@ -107,6 +121,8 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 			"SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASSWORD", "SMTP_FROM",
 			"LOG_LEVEL", "LOG_JSON", "METRICS_ENABLED",
 			"EMAIL_VERIFICATION_REQUIRED", "EMAIL_VERIFICATION_FRONTEND_URL", "EMAIL_VERIFICATION_TOKEN_MINUTES",
+			"EMAIL_CHANGE_FRONTEND_URL", "EMAIL_CHANGE_TOKEN_MINUTES",
+			"TURNSTILE_SECRET_KEY", "LOGIN_LOCKOUT_MAX_ATTEMPTS", "LOGIN_LOCKOUT_MINUTES",
 		} {
 			os.Unsetenv(k)
 		}

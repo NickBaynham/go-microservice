@@ -106,3 +106,47 @@ func (s *Sender) SendEmailVerification(_ context.Context, toEmail, verifyURL str
 
 	return smtp.SendMail(addr, auth, from, []string{toEmail}, msg)
 }
+
+// SendEmailChange emails a link to confirm moving the account to a new address. Same SMTP rules as SendPasswordReset.
+func (s *Sender) SendEmailChange(_ context.Context, toEmail, confirmURL string) error {
+	if strings.TrimSpace(s.cfg.SMTPHost) == "" {
+		if s.cfg.IsProduction() {
+			return fmt.Errorf("SMTP is not configured")
+		}
+		log.Printf("email change confirmation link for %s: %s", toEmail, confirmURL)
+		return nil
+	}
+
+	from := strings.TrimSpace(s.cfg.SMTPFrom)
+	if from == "" {
+		return fmt.Errorf("SMTP_FROM is required when SMTP_HOST is set")
+	}
+
+	host := strings.TrimSpace(s.cfg.SMTPHost)
+	port := strings.TrimSpace(s.cfg.SMTPPort)
+	if port == "" {
+		port = "587"
+	}
+	addr := host + ":" + port
+
+	subject := "Confirm your new email address"
+	body := "Confirm this email change by visiting:\n\n" + confirmURL + "\n\nIf you did not request this, you can ignore this email.\n"
+
+	msg := []byte("To: " + toEmail + "\r\n" +
+		"From: " + from + "\r\n" +
+		"Subject: " + subject + "\r\n" +
+		"MIME-Version: 1.0\r\n" +
+		"Content-Type: text/plain; charset=UTF-8\r\n" +
+		"\r\n" +
+		body + "\r\n")
+
+	user := strings.TrimSpace(s.cfg.SMTPUser)
+	pass := strings.TrimSpace(s.cfg.SMTPPassword)
+
+	var auth smtp.Auth
+	if user != "" {
+		auth = smtp.PlainAuth("", user, pass, host)
+	}
+
+	return smtp.SendMail(addr, auth, from, []string{toEmail}, msg)
+}

@@ -819,6 +819,24 @@ func TestAPI(t *testing.T) {
 		assertKey(t, r, "error")
 	})
 
+	t.Run("PUT /users/:id stages pending email without changing login email", func(t *testing.T) {
+		if userToken == "" || userID == "" {
+			t.Skip("userToken or userID not set — earlier test failed")
+		}
+		newEm := email("pendingem")
+		r := do(t, client, http.MethodPut, fmt.Sprintf("%s/users/%s", cfg.BaseURL, userID), userToken, map[string]any{
+			"email": newEm,
+		})
+		assertStatus(t, r.StatusCode, http.StatusOK, r)
+		if got, _ := r.Body["email"].(string); got != userEmail {
+			t.Fatalf("email: got %q want login email %q", got, userEmail)
+		}
+		wantP := strings.ToLower(strings.TrimSpace(newEm))
+		if got, _ := r.Body["pending_email"].(string); got != wantP {
+			t.Fatalf("pending_email: got %q want %q", got, wantP)
+		}
+	})
+
 	// ── DELETE /users/:id ─────────────────────────────────────────────────────
 
 	t.Run("DELETE /users/:id rejects regular user", func(t *testing.T) {

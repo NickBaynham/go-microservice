@@ -22,6 +22,58 @@ const docTemplate = `{
     "host": "{{.Host}}",
     "basePath": "{{.BasePath}}",
     "paths": {
+        "/auth/confirm-email-change": {
+            "post": {
+                "description": "Applies a new email after the user follows the link sent to the pending address. Invalidates refresh sessions.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "auth"
+                ],
+                "summary": "Confirm pending email change",
+                "parameters": [
+                    {
+                        "description": "Token from the email change message",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ConfirmEmailChangeRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.MessageResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "New email already in use",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/auth/forgot-password": {
             "post": {
                 "description": "Sends a reset link to the email when an account exists. Always returns the same message (does not reveal whether the email is registered). In production, SMTP and PASSWORD_RESET_FRONTEND_URL must be configured.",
@@ -106,7 +158,7 @@ const docTemplate = `{
                         }
                     },
                     "400": {
-                        "description": "Validation error",
+                        "description": "Captcha failed when Turnstile is configured",
                         "schema": {
                             "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
                         }
@@ -119,6 +171,12 @@ const docTemplate = `{
                     },
                     "403": {
                         "description": "Email not verified (when verification is required)",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
+                        }
+                    },
+                    "429": {
+                        "description": "Account temporarily locked after failed logins",
                         "schema": {
                             "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
                         }
@@ -262,7 +320,7 @@ const docTemplate = `{
                         }
                     },
                     "400": {
-                        "description": "Validation error",
+                        "description": "Validation error or captcha failed when Turnstile is configured",
                         "schema": {
                             "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
                         }
@@ -501,6 +559,95 @@ const docTemplate = `{
                 }
             }
         },
+        "/me/cancel-email-change": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Clears pending_email without changing the login address.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "users"
+                ],
+                "summary": "Cancel pending email change",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.User"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/me/resend-email-change": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Sends another confirmation link to the pending address when one is set.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "users"
+                ],
+                "summary": "Resend email change confirmation",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.MessageResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/users": {
             "get": {
                 "security": [
@@ -607,7 +754,7 @@ const docTemplate = `{
                         "BearerAuth": []
                     }
                 ],
-                "description": "Updates a user's profile. Users can update themselves; admins can update anyone and change roles.",
+                "description": "Updates a user's profile. Users can update themselves; admins can update anyone and change roles. Changing ` + "`" + `email` + "`" + ` stages the new address in ` + "`" + `pending_email` + "`" + ` and sends a confirmation link to that address; the login email stays the same until POST /auth/confirm-email-change succeeds.",
                 "consumes": [
                     "application/json"
                 ],
@@ -663,6 +810,18 @@ const docTemplate = `{
                     },
                     "404": {
                         "description": "User not found",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Email already taken",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Production email change not configured",
                         "schema": {
                             "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
                         }
@@ -722,6 +881,19 @@ const docTemplate = `{
         }
     },
     "definitions": {
+        "go-microservice_internal_models.ConfirmEmailChangeRequest": {
+            "description": "Confirm email change body",
+            "type": "object",
+            "required": [
+                "token"
+            ],
+            "properties": {
+                "token": {
+                    "type": "string",
+                    "example": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                }
+            }
+        },
         "go-microservice_internal_models.CreateUserRequest": {
             "description": "Registration request body",
             "type": "object",
@@ -744,6 +916,10 @@ const docTemplate = `{
                     "type": "string",
                     "minLength": 8,
                     "example": "securepassword"
+                },
+                "turnstile_token": {
+                    "type": "string",
+                    "example": "turnstile-response-token"
                 }
             }
         },
@@ -836,6 +1012,10 @@ const docTemplate = `{
                 "password": {
                     "type": "string",
                     "example": "securepassword"
+                },
+                "turnstile_token": {
+                    "type": "string",
+                    "example": "turnstile-response-token"
                 }
             }
         },
@@ -996,6 +1176,10 @@ const docTemplate = `{
                 "name": {
                     "type": "string",
                     "example": "Alice Smith"
+                },
+                "pending_email": {
+                    "type": "string",
+                    "example": "pending@example.com"
                 },
                 "role": {
                     "type": "string",

@@ -15,8 +15,9 @@ export default function Register() {
     setErr(null)
     setBusy(true)
     try {
-      await registerUser({ name, email, password })
-      nav('/login', { state: { registered: true } })
+      const { user } = await registerUser({ name, email, password })
+      const needsVerification = user.email_verified === false
+      nav('/login', { state: { registered: true, needsVerification } })
     } catch (x) {
       setErr(x instanceof Error ? x.message : 'register failed')
     } finally {

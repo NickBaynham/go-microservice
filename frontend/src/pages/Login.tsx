@@ -1,11 +1,12 @@
 import { FormEvent, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { loginUser } from '../api'
-import { setToken } from '../auth'
 
 export default function Login() {
   const nav = useNavigate()
-  const loc = useLocation() as { state?: { registered?: boolean; resetOk?: boolean } }
+  const loc = useLocation() as {
+    state?: { registered?: boolean; resetOk?: boolean; needsVerification?: boolean }
+  }
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [err, setErr] = useState<string | null>(null)
@@ -16,8 +17,7 @@ export default function Login() {
     setErr(null)
     setBusy(true)
     try {
-      const { token } = await loginUser(email, password)
-      setToken(token)
+      await loginUser(email, password)
       nav('/account', { replace: true })
     } catch (x) {
       setErr(x instanceof Error ? x.message : 'login failed')
@@ -30,7 +30,11 @@ export default function Login() {
     <main>
       <h1>Log in</h1>
       {loc.state?.registered && (
-        <p data-testid="login-flash">Account created — sign in below.</p>
+        <p data-testid="login-flash">
+          {loc.state?.needsVerification
+            ? 'Account created — check your email to verify your address, then sign in.'
+            : 'Account created — sign in below.'}
+        </p>
       )}
       {loc.state?.resetOk && (
         <p data-testid="login-flash-reset">Password updated — sign in with your new password.</p>
@@ -71,6 +75,8 @@ export default function Login() {
       </form>
       <p>
         <Link to="/register">Create an account</Link>
+        {' · '}
+        <Link to="/verify-email">Verify email</Link>
         {' · '}
         <Link to="/forgot-password">Forgot password?</Link>
       </p>

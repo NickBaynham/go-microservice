@@ -86,10 +86,20 @@ definitions:
     - password
     type: object
   go-microservice_internal_models.LoginResponse:
-    description: Successful login response containing JWT and user info
+    description: Access token (short-lived), rotating refresh token, and user info.
+      Field token mirrors access_token for older clients.
     properties:
-      token:
+      access_token:
         example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+        type: string
+      expires_in:
+        example: 900
+        type: integer
+      refresh_token:
+        example: 64-char-hex...
+        type: string
+      token:
+        example: same as access_token
         type: string
       user:
         $ref: '#/definitions/go-microservice_internal_models.User'
@@ -101,6 +111,26 @@ definitions:
         example: user deleted successfully
         type: string
     type: object
+  go-microservice_internal_models.RefreshResponse:
+    description: New access + refresh pair
+    properties:
+      access_token:
+        type: string
+      expires_in:
+        type: integer
+      refresh_token:
+        type: string
+      token:
+        type: string
+    type: object
+  go-microservice_internal_models.RefreshTokenBody:
+    description: Refresh token string from login or previous refresh
+    properties:
+      refresh_token:
+        type: string
+    required:
+    - refresh_token
+    type: object
   go-microservice_internal_models.RegisterResponse:
     description: Successful registration response
     properties:
@@ -109,6 +139,20 @@ definitions:
         type: string
       user:
         $ref: '#/definitions/go-microservice_internal_models.User'
+      verification_token:
+        description: VerificationToken is returned only when ENV=test and email verification
+          is required (for automated tests).
+        example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+        type: string
+    type: object
+  go-microservice_internal_models.ResendVerificationRequest:
+    description: Resend verification email
+    properties:
+      email:
+        example: alice@example.com
+        type: string
+    required:
+    - email
     type: object
   go-microservice_internal_models.ResetPasswordRequest:
     description: Reset-password request
@@ -147,6 +191,9 @@ definitions:
       email:
         example: alice@example.com
         type: string
+      email_verified:
+        example: true
+        type: boolean
       id:
         example: 64b1f9e2c3d4e5f6a7b8c9d0
         type: string
@@ -159,6 +206,15 @@ definitions:
       updated_at:
         example: "2024-01-01T00:00:00Z"
         type: string
+    type: object
+  go-microservice_internal_models.VerifyEmailRequest:
+    description: Email verification body
+    properties:
+      token:
+        example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+        type: string
+    required:
+    - token
     type: object
 host: localhost:8443
 info:
@@ -212,7 +268,8 @@ paths:
     post:
       consumes:
       - application/json
-      description: Authenticates a user and returns a signed JWT token.
+      description: Authenticates a user and returns a short-lived access JWT plus
+        a rotating refresh token.
       parameters:
       - description: Login credentials
         in: body
@@ -235,6 +292,10 @@ paths:
           description: Invalid credentials
           schema:
             $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "403":
+          description: Email not verified (when verification is required)
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
         "500":
           description: Internal server error
           schema:
@@ -242,12 +303,80 @@ paths:
       summary: Login
       tags:
       - auth
+  /auth/logout:
+    post:
+      consumes:
+      - application/json
+      description: Revokes the given refresh token (client should discard access +
+        refresh locally).
+      parameters:
+      - description: Refresh token to revoke
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/go-microservice_internal_models.RefreshTokenBody'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.MessageResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+      summary: Logout
+      tags:
+      - auth
+  /auth/refresh:
+    post:
+      consumes:
+      - application/json
+      description: Exchanges a valid refresh token for a new access token and a new
+        refresh token (rotation).
+      parameters:
+      - description: Current refresh token
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/go-microservice_internal_models.RefreshTokenBody'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.RefreshResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+      summary: Refresh tokens
+      tags:
+      - auth
   /auth/register:
     post:
       consumes:
       - application/json
       description: Creates a new user account. The first user in the database becomes
-        "admin"; everyone else is "user". Client-supplied roles are ignored.
+        "admin"; everyone else is "user". Client-supplied roles are ignored. When
+        EMAIL_VERIFICATION_REQUIRED is true, the user is created with email_verified
+        false and a verification email is sent; production requires SMTP and EMAIL_VERIFICATION_FRONTEND_URL.
       parameters:
       - description: Registration details
         in: body
@@ -274,7 +403,48 @@ paths:
           description: Internal server error
           schema:
             $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "503":
+          description: Email verification enabled but not configured (production)
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
       summary: Register a new user
+      tags:
+      - auth
+  /auth/resend-verification:
+    post:
+      consumes:
+      - application/json
+      description: Sends a new verification link when the account exists and is not
+        yet verified. Same response whether or not the email is registered (privacy).
+        Requires EMAIL_VERIFICATION_REQUIRED; in production, SMTP and EMAIL_VERIFICATION_FRONTEND_URL
+        must be set.
+      parameters:
+      - description: Email address
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/go-microservice_internal_models.ResendVerificationRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.MessageResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+      summary: Resend verification email
       tags:
       - auth
   /auth/reset-password:
@@ -310,6 +480,37 @@ paths:
           schema:
             $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
       summary: Complete password reset
+      tags:
+      - auth
+  /auth/verify-email:
+    post:
+      consumes:
+      - application/json
+      description: Confirms email ownership using the token from the registration
+        email. Public endpoint.
+      parameters:
+      - description: Verification token from email
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/go-microservice_internal_models.VerifyEmailRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.MessageResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+      summary: Verify email address
       tags:
       - auth
   /health:

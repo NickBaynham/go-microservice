@@ -32,9 +32,11 @@ package integration
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -119,6 +121,12 @@ func resetUsersCollection(t *testing.T) {
 		t.Fatalf("reset users: %v", err)
 	}
 	t.Logf("✔ cleared users collection in %q (%d documents removed)", mongoDB, res.DeletedCount)
+
+	if r2, err := client.Database(mongoDB).Collection("refresh_tokens").DeleteMany(ctx, bson.M{}); err != nil {
+		t.Fatalf("reset refresh_tokens: %v", err)
+	} else {
+		t.Logf("✔ cleared refresh_tokens collection (%d documents removed)", r2.DeletedCount)
+	}
 }
 
 // ── Wait for server ───────────────────────────────────────────────────────────
@@ -208,6 +216,48 @@ func TestAPI(t *testing.T) {
 
 	t.Run("GET /health returns healthy", func(t *testing.T) {
 		assertHealthReturnsOK(t, cfg, client)
+	})
+
+	t.Run("GET /metrics returns Prometheus text", func(t *testing.T) {
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, cfg.BaseURL+"/metrics", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET /metrics: status %d", resp.StatusCode)
+		}
+		raw, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := string(raw)
+		if !strings.Contains(body, "gomicro_http_requests_total") {
+			t.Errorf("expected gomicro_http_requests_total in /metrics body (prefix %.400q)", body)
+		}
+	})
+
+	t.Run("X-Request-ID header is echoed", func(t *testing.T) {
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, cfg.BaseURL+"/health", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("X-Request-ID", "integration-test-req-id")
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status %d", resp.StatusCode)
+		}
+		if got := resp.Header.Get("X-Request-ID"); got != "integration-test-req-id" {
+			t.Errorf("X-Request-ID: got %q, want integration-test-req-id", got)
+		}
 	})
 
 	t.Run("GET /health plain HTTP optional", func(t *testing.T) {
@@ -384,6 +434,10 @@ func TestAPI(t *testing.T) {
 
 		assertStatus(t, r.StatusCode, http.StatusOK, r)
 		adminToken = assertNonEmptyString(t, r, "token")
+		if assertNonEmptyString(t, r, "access_token") != adminToken {
+			t.Error("access_token must match token for API clients")
+		}
+		assertNonEmptyString(t, r, "refresh_token")
 		assertNestedStringField(t, r, "user", "email", adminEmail)
 		assertNestedStringField(t, r, "user", "role", "admin")
 
@@ -401,7 +455,36 @@ func TestAPI(t *testing.T) {
 		})
 		assertStatus(t, r.StatusCode, http.StatusOK, r)
 		userToken = assertNonEmptyString(t, r, "token")
+		assertNonEmptyString(t, r, "refresh_token")
 		assertNestedStringField(t, r, "user", "email", userEmail)
+	})
+
+	t.Run("POST /auth/refresh rotates refresh and invalidates old", func(t *testing.T) {
+		login := do(t, client, http.MethodPost, cfg.BaseURL+"/auth/login", "", map[string]any{
+			"email":    adminEmail,
+			"password": adminPass,
+		})
+		assertStatus(t, login.StatusCode, http.StatusOK, login)
+		oldRT, _ := login.Body["refresh_token"].(string)
+		if oldRT == "" {
+			t.Fatal("login missing refresh_token")
+		}
+		ref := do(t, client, http.MethodPost, cfg.BaseURL+"/auth/refresh", "", map[string]any{
+			"refresh_token": oldRT,
+		})
+		assertStatus(t, ref.StatusCode, http.StatusOK, ref)
+		newAT := assertNonEmptyString(t, ref, "access_token")
+		newRT, _ := ref.Body["refresh_token"].(string)
+		if newRT == "" || newRT == oldRT {
+			t.Fatalf("expected new refresh_token, got %q", newRT)
+		}
+		if _, err := auth.ValidateToken(newAT, getEnv("JWT_SECRET", "change-me-in-production")); err != nil {
+			t.Fatalf("new access token invalid: %v", err)
+		}
+		reuse := do(t, client, http.MethodPost, cfg.BaseURL+"/auth/refresh", "", map[string]any{
+			"refresh_token": oldRT,
+		})
+		assertStatus(t, reuse.StatusCode, http.StatusUnauthorized, reuse)
 	})
 
 	t.Run("POST /auth/login rejects wrong password", func(t *testing.T) {

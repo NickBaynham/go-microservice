@@ -9,13 +9,14 @@ import (
 // User represents a user in the system
 // @Description User account information
 type User struct {
-	ID        primitive.ObjectID `bson:"_id,omitempty" json:"id,omitempty"  example:"64b1f9e2c3d4e5f6a7b8c9d0"`
-	Name      string             `bson:"name"          json:"name"          example:"Alice Smith"`
-	Email     string             `bson:"email"         json:"email"         example:"alice@example.com"`
-	Password  string             `bson:"password"      json:"-"`
-	Role      string             `bson:"role"          json:"role"          example:"user"`
-	CreatedAt time.Time          `bson:"created_at"    json:"created_at"    example:"2024-01-01T00:00:00Z"`
-	UpdatedAt time.Time          `bson:"updated_at"    json:"updated_at"    example:"2024-01-01T00:00:00Z"`
+	ID             primitive.ObjectID `bson:"_id,omitempty" json:"id,omitempty"  example:"64b1f9e2c3d4e5f6a7b8c9d0"`
+	Name           string             `bson:"name"          json:"name"          example:"Alice Smith"`
+	Email          string             `bson:"email"         json:"email"         example:"alice@example.com"`
+	Password       string             `bson:"password"      json:"-"`
+	Role           string             `bson:"role"          json:"role"          example:"user"`
+	EmailVerified bool               `bson:"email_verified"  json:"email_verified"  example:"true"`
+	CreatedAt     time.Time          `bson:"created_at"    json:"created_at"    example:"2024-01-01T00:00:00Z"`
+	UpdatedAt     time.Time          `bson:"updated_at"    json:"updated_at"    example:"2024-01-01T00:00:00Z"`
 }
 
 // CreateUserRequest is the payload for registering a new user
@@ -42,10 +43,28 @@ type LoginRequest struct {
 }
 
 // LoginResponse is returned on successful login
-// @Description Successful login response containing JWT and user info
+// @Description Access token (short-lived), rotating refresh token, and user info. Field token mirrors access_token for older clients.
 type LoginResponse struct {
-	Token string `json:"token" example:"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."`
-	User  User   `json:"user"`
+	AccessToken  string `json:"access_token" example:"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."`
+	RefreshToken string `json:"refresh_token" example:"64-char-hex..."`
+	ExpiresIn    int    `json:"expires_in"   example:"900"`
+	Token        string `json:"token"        example:"same as access_token"`
+	User         User   `json:"user"`
+}
+
+// RefreshResponse is returned by POST /auth/refresh after rotating the refresh token.
+// @Description New access + refresh pair
+type RefreshResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	ExpiresIn    int    `json:"expires_in"`
+	Token        string `json:"token"`
+}
+
+// RefreshTokenBody is the JSON body for refresh and logout.
+// @Description Refresh token string from login or previous refresh
+type RefreshTokenBody struct {
+	RefreshToken string `json:"refresh_token" binding:"required"`
 }
 
 // ErrorResponse is a generic error response
@@ -80,6 +99,20 @@ type ListUsersResponse struct {
 type RegisterResponse struct {
 	Message string `json:"message" example:"user registered successfully"`
 	User    User   `json:"user"`
+	// VerificationToken is returned only when ENV=test and email verification is required (for automated tests).
+	VerificationToken *string `json:"verification_token,omitempty" example:"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."`
+}
+
+// VerifyEmailRequest completes email verification using the token from the signup email.
+// @Description Email verification body
+type VerifyEmailRequest struct {
+	Token string `json:"token" binding:"required" example:"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."`
+}
+
+// ResendVerificationRequest asks to resend the verification email (same response whether or not the address exists).
+// @Description Resend verification email
+type ResendVerificationRequest struct {
+	Email string `json:"email" binding:"required,email" example:"alice@example.com"`
 }
 
 // ForgotPasswordRequest asks for a reset email for the given address.

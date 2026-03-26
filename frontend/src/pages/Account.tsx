@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { fetchMe, type User } from '../api'
-import { clearToken, getToken } from '../auth'
+import { fetchMe, logoutUser, type User } from '../api'
+import { getToken } from '../auth'
 
 export default function Account() {
   const nav = useNavigate()
@@ -9,20 +9,19 @@ export default function Account() {
   const [err, setErr] = useState<string | null>(null)
 
   useEffect(() => {
-    const tok = getToken()
-    if (!tok) {
+    if (!getToken()) {
       nav('/login', { replace: true })
       return
     }
     let cancelled = false
     ;(async () => {
       try {
-        const u = await fetchMe(tok)
+        const u = await fetchMe()
         if (!cancelled) setUser(u)
       } catch (x) {
         if (!cancelled) {
           setErr(x instanceof Error ? x.message : 'failed to load profile')
-          clearToken()
+          await logoutUser()
         }
       }
     })()
@@ -31,8 +30,8 @@ export default function Account() {
     }
   }, [nav])
 
-  function logout() {
-    clearToken()
+  async function logout() {
+    await logoutUser()
     nav('/login', { replace: true })
   }
 

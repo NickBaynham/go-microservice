@@ -76,7 +76,7 @@ const docTemplate = `{
         },
         "/auth/login": {
             "post": {
-                "description": "Authenticates a user and returns a signed JWT token.",
+                "description": "Authenticates a user and returns a short-lived access JWT plus a rotating refresh token.",
                 "consumes": [
                     "application/json"
                 ],
@@ -117,6 +117,12 @@ const docTemplate = `{
                             "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
                         }
                     },
+                    "403": {
+                        "description": "Email not verified (when verification is required)",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
+                        }
+                    },
                     "500": {
                         "description": "Internal server error",
                         "schema": {
@@ -126,9 +132,107 @@ const docTemplate = `{
                 }
             }
         },
+        "/auth/logout": {
+            "post": {
+                "description": "Revokes the given refresh token (client should discard access + refresh locally).",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "auth"
+                ],
+                "summary": "Logout",
+                "parameters": [
+                    {
+                        "description": "Refresh token to revoke",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.RefreshTokenBody"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.MessageResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/auth/refresh": {
+            "post": {
+                "description": "Exchanges a valid refresh token for a new access token and a new refresh token (rotation).",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "auth"
+                ],
+                "summary": "Refresh tokens",
+                "parameters": [
+                    {
+                        "description": "Current refresh token",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.RefreshTokenBody"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.RefreshResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/auth/register": {
             "post": {
-                "description": "Creates a new user account. The first user in the database becomes \"admin\"; everyone else is \"user\". Client-supplied roles are ignored.",
+                "description": "Creates a new user account. The first user in the database becomes \"admin\"; everyone else is \"user\". Client-supplied roles are ignored. When EMAIL_VERIFICATION_REQUIRED is true, the user is created with email_verified false and a verification email is sent; production requires SMTP and EMAIL_VERIFICATION_FRONTEND_URL.",
                 "consumes": [
                     "application/json"
                 ],
@@ -171,6 +275,64 @@ const docTemplate = `{
                     },
                     "500": {
                         "description": "Internal server error",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Email verification enabled but not configured (production)",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/auth/resend-verification": {
+            "post": {
+                "description": "Sends a new verification link when the account exists and is not yet verified. Same response whether or not the email is registered (privacy). Requires EMAIL_VERIFICATION_REQUIRED; in production, SMTP and EMAIL_VERIFICATION_FRONTEND_URL must be set.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "auth"
+                ],
+                "summary": "Resend verification email",
+                "parameters": [
+                    {
+                        "description": "Email address",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ResendVerificationRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.MessageResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
                         "schema": {
                             "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
                         }
@@ -223,6 +385,52 @@ const docTemplate = `{
                     },
                     "500": {
                         "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/auth/verify-email": {
+            "post": {
+                "description": "Confirms email ownership using the token from the registration email. Public endpoint.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "auth"
+                ],
+                "summary": "Verify email address",
+                "parameters": [
+                    {
+                        "description": "Verification token from email",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.VerifyEmailRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.MessageResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
                         "schema": {
                             "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
                         }
@@ -632,12 +840,24 @@ const docTemplate = `{
             }
         },
         "go-microservice_internal_models.LoginResponse": {
-            "description": "Successful login response containing JWT and user info",
+            "description": "Access token (short-lived), rotating refresh token, and user info. Field token mirrors access_token for older clients.",
             "type": "object",
             "properties": {
-                "token": {
+                "access_token": {
                     "type": "string",
                     "example": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                },
+                "expires_in": {
+                    "type": "integer",
+                    "example": 900
+                },
+                "refresh_token": {
+                    "type": "string",
+                    "example": "64-char-hex..."
+                },
+                "token": {
+                    "type": "string",
+                    "example": "same as access_token"
                 },
                 "user": {
                     "$ref": "#/definitions/go-microservice_internal_models.User"
@@ -654,6 +874,36 @@ const docTemplate = `{
                 }
             }
         },
+        "go-microservice_internal_models.RefreshResponse": {
+            "description": "New access + refresh pair",
+            "type": "object",
+            "properties": {
+                "access_token": {
+                    "type": "string"
+                },
+                "expires_in": {
+                    "type": "integer"
+                },
+                "refresh_token": {
+                    "type": "string"
+                },
+                "token": {
+                    "type": "string"
+                }
+            }
+        },
+        "go-microservice_internal_models.RefreshTokenBody": {
+            "description": "Refresh token string from login or previous refresh",
+            "type": "object",
+            "required": [
+                "refresh_token"
+            ],
+            "properties": {
+                "refresh_token": {
+                    "type": "string"
+                }
+            }
+        },
         "go-microservice_internal_models.RegisterResponse": {
             "description": "Successful registration response",
             "type": "object",
@@ -664,6 +914,24 @@ const docTemplate = `{
                 },
                 "user": {
                     "$ref": "#/definitions/go-microservice_internal_models.User"
+                },
+                "verification_token": {
+                    "description": "VerificationToken is returned only when ENV=test and email verification is required (for automated tests).",
+                    "type": "string",
+                    "example": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                }
+            }
+        },
+        "go-microservice_internal_models.ResendVerificationRequest": {
+            "description": "Resend verification email",
+            "type": "object",
+            "required": [
+                "email"
+            ],
+            "properties": {
+                "email": {
+                    "type": "string",
+                    "example": "alice@example.com"
                 }
             }
         },
@@ -717,6 +985,10 @@ const docTemplate = `{
                     "type": "string",
                     "example": "alice@example.com"
                 },
+                "email_verified": {
+                    "type": "boolean",
+                    "example": true
+                },
                 "id": {
                     "type": "string",
                     "example": "64b1f9e2c3d4e5f6a7b8c9d0"
@@ -732,6 +1004,19 @@ const docTemplate = `{
                 "updated_at": {
                     "type": "string",
                     "example": "2024-01-01T00:00:00Z"
+                }
+            }
+        },
+        "go-microservice_internal_models.VerifyEmailRequest": {
+            "description": "Email verification body",
+            "type": "object",
+            "required": [
+                "token"
+            ],
+            "properties": {
+                "token": {
+                    "type": "string",
+                    "example": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
                 }
             }
         }

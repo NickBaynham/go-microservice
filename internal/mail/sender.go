@@ -62,3 +62,47 @@ func (s *Sender) SendPasswordReset(_ context.Context, toEmail, resetURL string) 
 
 	return smtp.SendMail(addr, auth, from, []string{toEmail}, msg)
 }
+
+// SendEmailVerification emails a link to confirm the address. Same SMTP rules as SendPasswordReset.
+func (s *Sender) SendEmailVerification(_ context.Context, toEmail, verifyURL string) error {
+	if strings.TrimSpace(s.cfg.SMTPHost) == "" {
+		if s.cfg.IsProduction() {
+			return fmt.Errorf("SMTP is not configured")
+		}
+		log.Printf("email verification link for %s: %s", toEmail, verifyURL)
+		return nil
+	}
+
+	from := strings.TrimSpace(s.cfg.SMTPFrom)
+	if from == "" {
+		return fmt.Errorf("SMTP_FROM is required when SMTP_HOST is set")
+	}
+
+	host := strings.TrimSpace(s.cfg.SMTPHost)
+	port := strings.TrimSpace(s.cfg.SMTPPort)
+	if port == "" {
+		port = "587"
+	}
+	addr := host + ":" + port
+
+	subject := "Verify your email"
+	body := "Confirm your email address by visiting:\n\n" + verifyURL + "\n\nIf you did not create an account, you can ignore this email.\n"
+
+	msg := []byte("To: " + toEmail + "\r\n" +
+		"From: " + from + "\r\n" +
+		"Subject: " + subject + "\r\n" +
+		"MIME-Version: 1.0\r\n" +
+		"Content-Type: text/plain; charset=UTF-8\r\n" +
+		"\r\n" +
+		body + "\r\n")
+
+	user := strings.TrimSpace(s.cfg.SMTPUser)
+	pass := strings.TrimSpace(s.cfg.SMTPPassword)
+
+	var auth smtp.Auth
+	if user != "" {
+		auth = smtp.PlainAuth("", user, pass, host)
+	}
+
+	return smtp.SendMail(addr, auth, from, []string{toEmail}, msg)
+}

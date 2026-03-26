@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"go-microservice/internal/auth"
@@ -13,17 +14,21 @@ import (
 	"go-microservice/internal/models"
 	"go-microservice/internal/repository"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"golang.org/x/crypto/bcrypt"
 )
 
-// PasswordResetMailer delivers the password-reset link (e.g. SMTP or log).
-type PasswordResetMailer interface {
+// AuthMailer delivers transactional auth emails (password reset, email verification).
+type AuthMailer interface {
 	SendPasswordReset(ctx context.Context, toEmail, resetURL string) error
+	SendEmailVerification(ctx context.Context, toEmail, verifyURL string) error
 }
 
 type noopMailer struct{}
 
 func (noopMailer) SendPasswordReset(context.Context, string, string) error { return nil }
+
+func (noopMailer) SendEmailVerification(context.Context, string, string) error { return nil }
 
 type userStore interface {
 	Count(ctx context.Context) (int64, error)
@@ -35,17 +40,28 @@ type userStore interface {
 	Delete(ctx context.Context, id string) error
 }
 
-type UserHandler struct {
-	repo   userStore
-	cfg    *config.Config
-	mailer PasswordResetMailer
+type refreshSessionStore interface {
+	Insert(ctx context.Context, userID primitive.ObjectID, tokenHash, familyID string, expiresAt time.Time) error
+	ConsumeAndRotate(ctx context.Context, presentedHash, newHash string, newExpires time.Time) (*repository.RefreshTokenDoc, error)
+	DeleteByHash(ctx context.Context, tokenHash string) (bool, error)
+	DeleteAllForUser(ctx context.Context, userID primitive.ObjectID) (int64, error)
 }
 
-func NewUserHandler(repo userStore, cfg *config.Config, mailer PasswordResetMailer) *UserHandler {
+type UserHandler struct {
+	repo    userStore
+	refresh refreshSessionStore
+	cfg     *config.Config
+	mailer  AuthMailer
+}
+
+func NewUserHandler(repo userStore, refresh refreshSessionStore, cfg *config.Config, mailer AuthMailer) *UserHandler {
 	if mailer == nil {
 		mailer = noopMailer{}
 	}
-	return &UserHandler{repo: repo, cfg: cfg, mailer: mailer}
+	if refresh == nil {
+		panic("refresh session store is required")
+	}
+	return &UserHandler{repo: repo, refresh: refresh, cfg: cfg, mailer: mailer}
 }
 
 func passwordResetLink(base, token string) string {
@@ -53,9 +69,13 @@ func passwordResetLink(base, token string) string {
 	return b + "?token=" + url.QueryEscape(token)
 }
 
+func emailVerificationLink(base, token string) string {
+	return passwordResetLink(base, token)
+}
+
 // Register godoc
 // @Summary      Register a new user
-// @Description  Creates a new user account. The first user in the database becomes "admin"; everyone else is "user". Client-supplied roles are ignored.
+// @Description  Creates a new user account. The first user in the database becomes "admin"; everyone else is "user". Client-supplied roles are ignored. When EMAIL_VERIFICATION_REQUIRED is true, the user is created with email_verified false and a verification email is sent; production requires SMTP and EMAIL_VERIFICATION_FRONTEND_URL.
 // @Tags         auth
 // @Accept       json
 // @Produce      json
@@ -63,6 +83,7 @@ func passwordResetLink(base, token string) string {
 // @Success      201   {object}  models.RegisterResponse
 // @Failure      400   {object}  models.ErrorResponse  "Validation error"
 // @Failure      409   {object}  models.ErrorResponse  "Email already exists"
+// @Failure      503   {object}  models.ErrorResponse  "Email verification enabled but not configured (production)"
 // @Failure      500   {object}  models.ErrorResponse  "Internal server error"
 // @Router       /auth/register [post]
 func (h *UserHandler) Register(c *gin.Context) {
@@ -89,11 +110,26 @@ func (h *UserHandler) Register(c *gin.Context) {
 		role = "admin"
 	}
 
+	emailVerified := true
+	if h.cfg.EmailVerificationRequired {
+		emailVerified = false
+	}
+
+	if h.cfg.EmailVerificationRequired && h.cfg.IsProduction() {
+		if strings.TrimSpace(h.cfg.SMTPHost) == "" || strings.TrimSpace(h.cfg.EmailVerificationFrontendURL) == "" {
+			c.JSON(http.StatusServiceUnavailable, models.ErrorResponse{
+				Error: "email verification is enabled but not configured (set SMTP_HOST, SMTP_FROM, and EMAIL_VERIFICATION_FRONTEND_URL)",
+			})
+			return
+		}
+	}
+
 	user := &models.User{
-		Name:     req.Name,
-		Email:    req.Email,
-		Password: string(hashed),
-		Role:     role,
+		Name:          req.Name,
+		Email:         req.Email,
+		Password:      string(hashed),
+		Role:          role,
+		EmailVerified: emailVerified,
 	}
 
 	if err := h.repo.Create(c.Request.Context(), user); err != nil {
@@ -105,12 +141,35 @@ func (h *UserHandler) Register(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, models.RegisterResponse{Message: "user registered successfully", User: *user})
+	if !h.cfg.EmailVerificationRequired {
+		c.JSON(http.StatusCreated, models.RegisterResponse{Message: "user registered successfully", User: *user})
+		return
+	}
+
+	tok, err := auth.GenerateEmailVerificationToken(user.ID.Hex(), h.cfg.JWTSecret, h.cfg.EmailVerificationTokenMinutes)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to generate verification token"})
+		return
+	}
+	link := emailVerificationLink(h.cfg.EmailVerificationFrontendURL, tok)
+	if err := h.mailer.SendEmailVerification(c.Request.Context(), user.Email, link); err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to send verification email"})
+		return
+	}
+
+	resp := models.RegisterResponse{
+		Message: "User registered. Check your email to verify your address before signing in.",
+		User:    *user,
+	}
+	if h.cfg.IsTestEnv() {
+		resp.VerificationToken = &tok
+	}
+	c.JSON(http.StatusCreated, resp)
 }
 
 // Login godoc
 // @Summary      Login
-// @Description  Authenticates a user and returns a signed JWT token.
+// @Description  Authenticates a user and returns a short-lived access JWT plus a rotating refresh token.
 // @Tags         auth
 // @Accept       json
 // @Produce      json
@@ -118,6 +177,7 @@ func (h *UserHandler) Register(c *gin.Context) {
 // @Success      200   {object}  models.LoginResponse
 // @Failure      400   {object}  models.ErrorResponse  "Validation error"
 // @Failure      401   {object}  models.ErrorResponse  "Invalid credentials"
+// @Failure      403   {object}  models.ErrorResponse  "Email not verified (when verification is required)"
 // @Failure      500   {object}  models.ErrorResponse  "Internal server error"
 // @Router       /auth/login [post]
 func (h *UserHandler) Login(c *gin.Context) {
@@ -138,13 +198,129 @@ func (h *UserHandler) Login(c *gin.Context) {
 		return
 	}
 
-	token, err := auth.GenerateToken(user.ID.Hex(), user.Email, user.Role, h.cfg.JWTSecret, h.cfg.JWTExpireHours)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to generate token"})
+	if h.cfg.EmailVerificationRequired && !user.EmailVerified {
+		c.JSON(http.StatusForbidden, models.ErrorResponse{Error: "email address not verified"})
 		return
 	}
 
-	c.JSON(http.StatusOK, models.LoginResponse{Token: token, User: *user})
+	resp, err := h.createSession(c, user)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to create session"})
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+func (h *UserHandler) createSession(c *gin.Context, user *models.User) (models.LoginResponse, error) {
+	access, err := auth.GenerateAccessToken(user.ID.Hex(), user.Email, user.Role, h.cfg.JWTSecret, h.cfg.JWTAccessExpireMinutes)
+	if err != nil {
+		return models.LoginResponse{}, err
+	}
+	plain, hash, err := auth.NewRefreshTokenPair()
+	if err != nil {
+		return models.LoginResponse{}, err
+	}
+	familyID := primitive.NewObjectID().Hex()
+	expiresAt := time.Now().Add(time.Duration(h.cfg.JWTRefreshExpireHours) * time.Hour)
+	if err := h.refresh.Insert(c.Request.Context(), user.ID, hash, familyID, expiresAt); err != nil {
+		return models.LoginResponse{}, err
+	}
+	expiresIn := h.cfg.JWTAccessExpireMinutes * 60
+	if expiresIn < 1 {
+		expiresIn = 1
+	}
+	return models.LoginResponse{
+		AccessToken:  access,
+		RefreshToken: plain,
+		ExpiresIn:    expiresIn,
+		Token:        access,
+		User:         *user,
+	}, nil
+}
+
+// Refresh godoc
+// @Summary      Refresh tokens
+// @Description  Exchanges a valid refresh token for a new access token and a new refresh token (rotation).
+// @Tags         auth
+// @Accept       json
+// @Produce      json
+// @Param        body  body      models.RefreshTokenBody  true  "Current refresh token"
+// @Success      200   {object}  models.RefreshResponse
+// @Failure      400   {object}  models.ErrorResponse
+// @Failure      401   {object}  models.ErrorResponse
+// @Failure      500   {object}  models.ErrorResponse
+// @Router       /auth/refresh [post]
+func (h *UserHandler) Refresh(c *gin.Context) {
+	var req models.RefreshTokenBody
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
+		return
+	}
+
+	presentedHash := auth.HashRefreshToken(req.RefreshToken)
+	newPlain, newHash, err := auth.NewRefreshTokenPair()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to issue refresh token"})
+		return
+	}
+	newExp := time.Now().Add(time.Duration(h.cfg.JWTRefreshExpireHours) * time.Hour)
+	old, err := h.refresh.ConsumeAndRotate(c.Request.Context(), presentedHash, newHash, newExp)
+	if err != nil {
+		if errors.Is(err, repository.ErrInvalidRefreshToken) {
+			c.JSON(http.StatusUnauthorized, models.ErrorResponse{Error: "invalid or expired refresh token"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: err.Error()})
+		return
+	}
+
+	user, err := h.repo.FindByID(c.Request.Context(), old.UserID.Hex())
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, models.ErrorResponse{Error: "invalid or expired refresh token"})
+		return
+	}
+
+	access, err := auth.GenerateAccessToken(user.ID.Hex(), user.Email, user.Role, h.cfg.JWTSecret, h.cfg.JWTAccessExpireMinutes)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to generate access token"})
+		return
+	}
+	expiresIn := h.cfg.JWTAccessExpireMinutes * 60
+	if expiresIn < 1 {
+		expiresIn = 1
+	}
+	c.JSON(http.StatusOK, models.RefreshResponse{
+		AccessToken:  access,
+		RefreshToken: newPlain,
+		ExpiresIn:    expiresIn,
+		Token:        access,
+	})
+}
+
+// Logout godoc
+// @Summary      Logout
+// @Description  Revokes the given refresh token (client should discard access + refresh locally).
+// @Tags         auth
+// @Accept       json
+// @Produce      json
+// @Param        body  body      models.RefreshTokenBody  true  "Refresh token to revoke"
+// @Success      200   {object}  models.MessageResponse
+// @Failure      400   {object}  models.ErrorResponse
+// @Failure      500   {object}  models.ErrorResponse
+// @Router       /auth/logout [post]
+func (h *UserHandler) Logout(c *gin.Context) {
+	var req models.RefreshTokenBody
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
+		return
+	}
+	hash := auth.HashRefreshToken(req.RefreshToken)
+	if _, err := h.refresh.DeleteByHash(c.Request.Context(), hash); err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, models.MessageResponse{Message: "logged out"})
 }
 
 const forgotPasswordAck = "If an account exists for this email, you will receive reset instructions."
@@ -239,7 +415,114 @@ func (h *UserHandler) ResetPassword(c *gin.Context) {
 		return
 	}
 
+	if oid, err := primitive.ObjectIDFromHex(userID); err == nil {
+		_, _ = h.refresh.DeleteAllForUser(c.Request.Context(), oid)
+	}
+
 	c.JSON(http.StatusOK, models.MessageResponse{Message: "password updated successfully"})
+}
+
+const resendVerificationAck = "If an account exists and needs verification, you will receive an email."
+
+// VerifyEmail godoc
+// @Summary      Verify email address
+// @Description  Confirms email ownership using the token from the registration email. Public endpoint.
+// @Tags         auth
+// @Accept       json
+// @Produce      json
+// @Param        body  body      models.VerifyEmailRequest  true  "Verification token from email"
+// @Success      200   {object}  models.MessageResponse
+// @Failure      400   {object}  models.ErrorResponse
+// @Failure      404   {object}  models.ErrorResponse
+// @Router       /auth/verify-email [post]
+func (h *UserHandler) VerifyEmail(c *gin.Context) {
+	var req models.VerifyEmailRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
+		return
+	}
+
+	userID, err := auth.ValidateEmailVerificationToken(req.Token, h.cfg.JWTSecret)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid or expired verification token"})
+		return
+	}
+
+	user, err := h.repo.FindByID(c.Request.Context(), userID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: err.Error()})
+		return
+	}
+
+	if user.EmailVerified {
+		c.JSON(http.StatusOK, models.MessageResponse{Message: "email already verified"})
+		return
+	}
+
+	if _, err := h.repo.Update(c.Request.Context(), userID, bson.M{"email_verified": true}); err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, models.MessageResponse{Message: "email verified successfully"})
+}
+
+// ResendVerification godoc
+// @Summary      Resend verification email
+// @Description  Sends a new verification link when the account exists and is not yet verified. Same response whether or not the email is registered (privacy). Requires EMAIL_VERIFICATION_REQUIRED; in production, SMTP and EMAIL_VERIFICATION_FRONTEND_URL must be set.
+// @Tags         auth
+// @Accept       json
+// @Produce      json
+// @Param        body  body      models.ResendVerificationRequest  true  "Email address"
+// @Success      200   {object}  models.MessageResponse
+// @Failure      400   {object}  models.ErrorResponse
+// @Failure      503   {object}  models.ErrorResponse
+// @Failure      500   {object}  models.ErrorResponse
+// @Router       /auth/resend-verification [post]
+func (h *UserHandler) ResendVerification(c *gin.Context) {
+	if !h.cfg.EmailVerificationRequired {
+		c.JSON(http.StatusOK, models.MessageResponse{Message: resendVerificationAck})
+		return
+	}
+
+	if h.cfg.IsProduction() {
+		if strings.TrimSpace(h.cfg.SMTPHost) == "" || strings.TrimSpace(h.cfg.EmailVerificationFrontendURL) == "" {
+			c.JSON(http.StatusServiceUnavailable, models.ErrorResponse{
+				Error: "email verification is not configured (set SMTP_HOST, SMTP_FROM, and EMAIL_VERIFICATION_FRONTEND_URL)",
+			})
+			return
+		}
+	}
+
+	var req models.ResendVerificationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
+		return
+	}
+
+	user, err := h.repo.FindByEmail(c.Request.Context(), req.Email)
+	if err != nil {
+		c.JSON(http.StatusOK, models.MessageResponse{Message: resendVerificationAck})
+		return
+	}
+
+	if user.EmailVerified {
+		c.JSON(http.StatusOK, models.MessageResponse{Message: resendVerificationAck})
+		return
+	}
+
+	tok, err := auth.GenerateEmailVerificationToken(user.ID.Hex(), h.cfg.JWTSecret, h.cfg.EmailVerificationTokenMinutes)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to generate verification token"})
+		return
+	}
+	link := emailVerificationLink(h.cfg.EmailVerificationFrontendURL, tok)
+	if err := h.mailer.SendEmailVerification(c.Request.Context(), user.Email, link); err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to send verification email"})
+		return
+	}
+
+	c.JSON(http.StatusOK, models.MessageResponse{Message: resendVerificationAck})
 }
 
 // ListUsers godoc
@@ -309,6 +592,12 @@ func (h *UserHandler) UpdateUser(c *gin.Context) {
 		return
 	}
 
+	existing, err := h.repo.FindByID(c.Request.Context(), targetID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: err.Error()})
+		return
+	}
+
 	var req models.UpdateUserRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
@@ -319,8 +608,11 @@ func (h *UserHandler) UpdateUser(c *gin.Context) {
 	if req.Name != "" {
 		update["name"] = req.Name
 	}
-	if req.Email != "" {
+	if req.Email != "" && req.Email != existing.Email {
 		update["email"] = req.Email
+		if h.cfg.EmailVerificationRequired {
+			update["email_verified"] = false
+		}
 	}
 	if req.Role != "" && callerRole == "admin" {
 		update["role"] = req.Role
@@ -340,6 +632,17 @@ func (h *UserHandler) UpdateUser(c *gin.Context) {
 		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: err.Error()})
 		return
 	}
+
+	if h.cfg.EmailVerificationRequired {
+		if em, ok := update["email"].(string); ok && em != "" && em != existing.Email {
+			tok, terr := auth.GenerateEmailVerificationToken(user.ID.Hex(), h.cfg.JWTSecret, h.cfg.EmailVerificationTokenMinutes)
+			if terr == nil {
+				link := emailVerificationLink(h.cfg.EmailVerificationFrontendURL, tok)
+				_ = h.mailer.SendEmailVerification(c.Request.Context(), user.Email, link)
+			}
+		}
+	}
+
 	c.JSON(http.StatusOK, user)
 }
 
@@ -356,9 +659,13 @@ func (h *UserHandler) UpdateUser(c *gin.Context) {
 // @Failure      404  {object}  models.ErrorResponse  "User not found"
 // @Router       /users/{id} [delete]
 func (h *UserHandler) DeleteUser(c *gin.Context) {
-	if err := h.repo.Delete(c.Request.Context(), c.Param("id")); err != nil {
+	id := c.Param("id")
+	if err := h.repo.Delete(c.Request.Context(), id); err != nil {
 		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: err.Error()})
 		return
+	}
+	if oid, err := primitive.ObjectIDFromHex(id); err == nil {
+		_, _ = h.refresh.DeleteAllForUser(c.Request.Context(), oid)
 	}
 	c.JSON(http.StatusOK, models.MessageResponse{Message: "user deleted successfully"})
 }

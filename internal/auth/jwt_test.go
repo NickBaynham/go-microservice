@@ -24,9 +24,10 @@ func TestGenerateToken_InvalidExpireHours_ReturnsError(t *testing.T) {
 	if err == nil {
 		t.Fatal("GenerateToken: expected error with invalid expiry")
 	}
-	_, err = auth.GenerateToken("user123", "alice@example.com", "user", testSecret, "9000")
+	// Hours are clamped when converted to minutes; invalid access TTL is only from GenerateAccessToken.
+	_, err = auth.GenerateAccessToken("user123", "alice@example.com", "user", testSecret, 10081)
 	if err == nil {
-		t.Fatal("GenerateToken: expected error when expiry > 8760")
+		t.Fatal("GenerateAccessToken: expected error when expiry minutes > 10080")
 	}
 }
 

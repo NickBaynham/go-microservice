@@ -7,8 +7,11 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"go-microservice/internal/auth"
@@ -30,10 +33,78 @@ func testConfig() *config.Config {
 	return &config.Config{
 		JWTSecret:                 testJWTSecret,
 		JWTExpireHours:            "24",
+		JWTAccessExpireMinutes:    1440,
+		JWTRefreshExpireHours:    720,
 		Env:                       "development",
 		PasswordResetFrontendURL:  "http://localhost:5173/reset-password",
 		PasswordResetTokenMinutes: 60,
 	}
+}
+
+type refreshEntry struct {
+	userID    primitive.ObjectID
+	familyID  string
+	expiresAt time.Time
+}
+
+// mapRefreshStore is an in-memory refresh session store for handler tests.
+type mapRefreshStore struct {
+	mu     sync.Mutex
+	byHash map[string]refreshEntry
+}
+
+func newMapRefreshStore() *mapRefreshStore {
+	return &mapRefreshStore{byHash: make(map[string]refreshEntry)}
+}
+
+func (m *mapRefreshStore) Insert(_ context.Context, userID primitive.ObjectID, tokenHash, familyID string, expiresAt time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.byHash[tokenHash] = refreshEntry{userID: userID, familyID: familyID, expiresAt: expiresAt}
+	return nil
+}
+
+func (m *mapRefreshStore) ConsumeAndRotate(_ context.Context, presentedHash, newHash string, newExpires time.Time) (*repository.RefreshTokenDoc, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	old, ok := m.byHash[presentedHash]
+	if !ok || !time.Now().Before(old.expiresAt) {
+		return nil, repository.ErrInvalidRefreshToken
+	}
+	if presentedHash == newHash {
+		m.byHash[presentedHash] = refreshEntry{userID: old.userID, familyID: old.familyID, expiresAt: newExpires}
+	} else {
+		if _, taken := m.byHash[newHash]; taken {
+			return nil, errors.New("refresh token hash collision")
+		}
+		m.byHash[newHash] = refreshEntry{userID: old.userID, familyID: old.familyID, expiresAt: newExpires}
+		delete(m.byHash, presentedHash)
+	}
+	return &repository.RefreshTokenDoc{UserID: old.userID, FamilyID: old.familyID, TokenHash: presentedHash}, nil
+}
+
+func (m *mapRefreshStore) DeleteByHash(_ context.Context, tokenHash string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.byHash[tokenHash]
+	if !ok || !time.Now().Before(e.expiresAt) {
+		return false, nil
+	}
+	delete(m.byHash, tokenHash)
+	return true, nil
+}
+
+func (m *mapRefreshStore) DeleteAllForUser(_ context.Context, userID primitive.ObjectID) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var n int64
+	for h, e := range m.byHash {
+		if e.userID == userID {
+			delete(m.byHash, h)
+			n++
+		}
+	}
+	return n, nil
 }
 
 type mockUserStore struct {
@@ -138,6 +209,9 @@ func (m *mockUserStore) Update(ctx context.Context, id string, update bson.M) (*
 	if v, ok := update["password"].(string); ok {
 		u.Password = v
 	}
+	if v, ok := update["email_verified"].(bool); ok {
+		u.EmailVerified = v
+	}
 	m.users[idx] = *u
 	return u, nil
 }
@@ -183,7 +257,7 @@ func registerUser(t *testing.T, h *handlers.UserHandler, name, email, password s
 
 func TestRegister_FirstUserBecomesAdmin(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig(), nil)
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), nil)
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -207,7 +281,7 @@ func TestRegister_FirstUserBecomesAdmin(t *testing.T) {
 
 func TestRegister_SecondUserIsUser(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig(), nil)
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), nil)
 
 	first := `{"name":"Admin","email":"admin@example.com","password":"password12"}`
 	w1 := httptest.NewRecorder()
@@ -240,7 +314,7 @@ func TestRegister_SecondUserIsUser(t *testing.T) {
 
 func TestRegister_DuplicateEmail(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig(), nil)
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), nil)
 	payload := []byte(`{"name":"Alice","email":"dup@example.com","password":"password12"}`)
 
 	for i := 0; i < 2; i++ {
@@ -261,7 +335,7 @@ func TestRegister_DuplicateEmail(t *testing.T) {
 func TestRegister_CountError(t *testing.T) {
 	store := newMockStore()
 	store.countErr = errors.New("database unavailable")
-	h := handlers.NewUserHandler(store, testConfig(), nil)
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), nil)
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -277,7 +351,7 @@ func TestRegister_CountError(t *testing.T) {
 
 func TestLogin_Success(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig(), nil)
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), nil)
 	u := registerUser(t, h, "Alice", "alice@example.com", "secretpass99")
 
 	w := httptest.NewRecorder()
@@ -294,17 +368,94 @@ func TestLogin_Success(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if resp.Token == "" {
-		t.Error("expected token")
+	if resp.Token == "" || resp.AccessToken == "" {
+		t.Error("expected token and access_token")
+	}
+	if resp.Token != resp.AccessToken {
+		t.Errorf("token should mirror access_token")
+	}
+	if resp.RefreshToken == "" {
+		t.Error("expected refresh_token")
+	}
+	if resp.ExpiresIn != 1440*60 {
+		t.Errorf("expires_in: got %d want %d", resp.ExpiresIn, 1440*60)
 	}
 	if resp.User.ID != u.ID {
 		t.Errorf("user id mismatch")
 	}
 }
 
+func TestRefresh_Success(t *testing.T) {
+	store := newMockStore()
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), nil)
+	registerUser(t, h, "Alice", "alice@example.com", "secretpass99")
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewReader([]byte(
+		`{"email":"alice@example.com","password":"secretpass99"}`,
+	)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.Login(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login: %d %s", w.Code, w.Body.String())
+	}
+	var login models.LoginResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &login); err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{"refresh_token":"` + login.RefreshToken + `"}`
+	w2 := httptest.NewRecorder()
+	c2, _ := gin.CreateTestContext(w2)
+	c2.Request = httptest.NewRequest(http.MethodPost, "/auth/refresh", bytes.NewReader([]byte(body)))
+	c2.Request.Header.Set("Content-Type", "application/json")
+	h.Refresh(c2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("refresh: %d %s", w2.Code, w2.Body.String())
+	}
+	var ref models.RefreshResponse
+	if err := json.Unmarshal(w2.Body.Bytes(), &ref); err != nil {
+		t.Fatal(err)
+	}
+	if ref.AccessToken == "" || ref.RefreshToken == "" || ref.Token != ref.AccessToken {
+		t.Fatalf("refresh response: %+v", ref)
+	}
+	if ref.RefreshToken == login.RefreshToken {
+		t.Error("refresh token should rotate")
+	}
+
+	w3 := httptest.NewRecorder()
+	c3, _ := gin.CreateTestContext(w3)
+	c3.Request = httptest.NewRequest(http.MethodPost, "/auth/refresh", bytes.NewReader([]byte(
+		`{"refresh_token":"`+login.RefreshToken+`"}`,
+	)))
+	c3.Request.Header.Set("Content-Type", "application/json")
+	h.Refresh(c3)
+	if w3.Code != http.StatusUnauthorized {
+		t.Errorf("reuse old refresh: got %d want 401", w3.Code)
+	}
+}
+
+func TestRefresh_InvalidToken(t *testing.T) {
+	store := newMockStore()
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), nil)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/auth/refresh", bytes.NewReader([]byte(
+		`{"refresh_token":"deadbeef"}`,
+	)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.Refresh(c)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status: got %d, want 401", w.Code)
+	}
+}
+
 func TestLogin_WrongPassword(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig(), nil)
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), nil)
 	registerUser(t, h, "Alice", "alice@example.com", "rightpass")
 
 	w := httptest.NewRecorder()
@@ -321,7 +472,7 @@ func TestLogin_WrongPassword(t *testing.T) {
 
 func TestLogin_UnknownEmail(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig(), nil)
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), nil)
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -338,8 +489,8 @@ func TestLogin_UnknownEmail(t *testing.T) {
 func TestLogin_TokenGenerationFailure(t *testing.T) {
 	store := newMockStore()
 	cfg := testConfig()
-	cfg.JWTExpireHours = "not-a-number"
-	h := handlers.NewUserHandler(store, cfg, nil)
+	cfg.JWTAccessExpireMinutes = -1
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), cfg, nil)
 	registerUser(t, h, "Alice", "alice@example.com", "password12")
 
 	w := httptest.NewRecorder()
@@ -356,7 +507,7 @@ func TestLogin_TokenGenerationFailure(t *testing.T) {
 
 func TestGetMe_Success(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig(), nil)
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), nil)
 	u := registerUser(t, h, "Me", "me@example.com", "password12")
 
 	w := httptest.NewRecorder()
@@ -378,7 +529,7 @@ func TestGetMe_Success(t *testing.T) {
 
 func TestGetMe_NotFound(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig(), nil)
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), nil)
 	fakeID := primitive.NewObjectID().Hex()
 
 	w := httptest.NewRecorder()
@@ -393,7 +544,7 @@ func TestGetMe_NotFound(t *testing.T) {
 
 func TestListUsers_Success(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig(), nil)
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), nil)
 	registerUser(t, h, "Alice", "a@example.com", "password12")
 
 	w := httptest.NewRecorder()
@@ -415,7 +566,7 @@ func TestListUsers_Success(t *testing.T) {
 func TestListUsers_RepositoryError(t *testing.T) {
 	store := newMockStore()
 	store.findAllErr = errors.New("db error")
-	h := handlers.NewUserHandler(store, testConfig(), nil)
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), nil)
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -428,7 +579,7 @@ func TestListUsers_RepositoryError(t *testing.T) {
 
 func TestGetUser_Success(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig(), nil)
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), nil)
 	u := registerUser(t, h, "Bob", "bob@example.com", "password12")
 
 	w := httptest.NewRecorder()
@@ -443,7 +594,7 @@ func TestGetUser_Success(t *testing.T) {
 
 func TestGetUser_NotFound(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig(), nil)
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), nil)
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -457,7 +608,7 @@ func TestGetUser_NotFound(t *testing.T) {
 
 func TestUpdateUser_ForbiddenWhenNotSelfAndNotAdmin(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig(), nil)
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), nil)
 	admin := registerUser(t, h, "Admin", "admin@example.com", "password12")
 	user := registerUser(t, h, "User", "user@example.com", "password12")
 
@@ -476,7 +627,7 @@ func TestUpdateUser_ForbiddenWhenNotSelfAndNotAdmin(t *testing.T) {
 
 func TestUpdateUser_Self(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig(), nil)
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), nil)
 	u := registerUser(t, h, "Old", "self@example.com", "password12")
 
 	w := httptest.NewRecorder()
@@ -494,7 +645,7 @@ func TestUpdateUser_Self(t *testing.T) {
 
 func TestUpdateUser_AdminSetsRole(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig(), nil)
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), nil)
 	registerUser(t, h, "Admin", "admin@example.com", "password12")
 	target := registerUser(t, h, "User", "user@example.com", "password12")
 
@@ -520,7 +671,7 @@ func TestUpdateUser_AdminSetsRole(t *testing.T) {
 
 func TestUpdateUser_NonAdminCannotSetRole(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig(), nil)
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), nil)
 	registerUser(t, h, "Admin", "admin@example.com", "password12")
 	u := registerUser(t, h, "User", "user@example.com", "password12")
 
@@ -540,7 +691,7 @@ func TestUpdateUser_NonAdminCannotSetRole(t *testing.T) {
 
 func TestUpdateUser_DuplicateEmail(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig(), nil)
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), nil)
 	registerUser(t, h, "Admin", "admin@example.com", "password12")
 	registerUser(t, h, "Alice", "a@example.com", "password12")
 	b := registerUser(t, h, "Bob", "b@example.com", "password12")
@@ -560,7 +711,7 @@ func TestUpdateUser_DuplicateEmail(t *testing.T) {
 
 func TestUpdateUser_NoFields(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig(), nil)
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), nil)
 	u := registerUser(t, h, "Solo", "solo@example.com", "password12")
 
 	w := httptest.NewRecorder()
@@ -578,7 +729,7 @@ func TestUpdateUser_NoFields(t *testing.T) {
 
 func TestDeleteUser_Success(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig(), nil)
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), nil)
 	registerUser(t, h, "Admin", "admin@example.com", "password12")
 	victim := registerUser(t, h, "Victim", "v@example.com", "password12")
 
@@ -594,7 +745,7 @@ func TestDeleteUser_Success(t *testing.T) {
 
 func TestDeleteUser_NotFound(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig(), nil)
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), nil)
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -608,9 +759,12 @@ func TestDeleteUser_NotFound(t *testing.T) {
 }
 
 type recordingMailer struct {
-	lastTo   string
-	lastURL  string
-	sendErr  error
+	lastTo         string
+	lastURL        string
+	lastVerifyTo   string
+	lastVerifyURL  string
+	sendErr        error
+	verifySendErr  error
 }
 
 func (r *recordingMailer) SendPasswordReset(_ context.Context, to, resetURL string) error {
@@ -622,10 +776,19 @@ func (r *recordingMailer) SendPasswordReset(_ context.Context, to, resetURL stri
 	return nil
 }
 
+func (r *recordingMailer) SendEmailVerification(_ context.Context, to, verifyURL string) error {
+	if r.verifySendErr != nil {
+		return r.verifySendErr
+	}
+	r.lastVerifyTo = to
+	r.lastVerifyURL = verifyURL
+	return nil
+}
+
 func TestForgotPassword_UnknownEmail_Still200(t *testing.T) {
 	store := newMockStore()
 	rec := &recordingMailer{}
-	h := handlers.NewUserHandler(store, testConfig(), rec)
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), rec)
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -645,7 +808,7 @@ func TestForgotPassword_UnknownEmail_Still200(t *testing.T) {
 func TestForgotPassword_SendsMailWhenUserExists(t *testing.T) {
 	store := newMockStore()
 	rec := &recordingMailer{}
-	h := handlers.NewUserHandler(store, testConfig(), rec)
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), rec)
 	registerUser(t, h, "Alice", "a@example.com", "password12")
 
 	w := httptest.NewRecorder()
@@ -667,7 +830,7 @@ func TestForgotPassword_ProductionWithoutSMTP_503(t *testing.T) {
 	store := newMockStore()
 	cfg := testConfig()
 	cfg.Env = "production"
-	h := handlers.NewUserHandler(store, cfg, &recordingMailer{})
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), cfg, &recordingMailer{})
 	registerUser(t, h, "Alice", "a@example.com", "password12")
 
 	w := httptest.NewRecorder()
@@ -685,7 +848,7 @@ func TestForgotPassword_ProductionWithoutSMTP_503(t *testing.T) {
 func TestForgotPassword_MailerError_500(t *testing.T) {
 	store := newMockStore()
 	rec := &recordingMailer{sendErr: errors.New("smtp down")}
-	h := handlers.NewUserHandler(store, testConfig(), rec)
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), rec)
 	registerUser(t, h, "Alice", "a@example.com", "password12")
 
 	w := httptest.NewRecorder()
@@ -704,7 +867,7 @@ func TestForgotPassword_TestEnvIncludesResetToken(t *testing.T) {
 	store := newMockStore()
 	cfg := testConfig()
 	cfg.Env = "test"
-	h := handlers.NewUserHandler(store, cfg, &recordingMailer{})
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), cfg, &recordingMailer{})
 	u := registerUser(t, h, "Alice", "a@example.com", "password12")
 
 	w := httptest.NewRecorder()
@@ -735,7 +898,7 @@ func TestForgotPassword_TestEnvIncludesResetToken(t *testing.T) {
 
 func TestResetPassword_Success(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig(), nil)
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), nil)
 	u := registerUser(t, h, "Alice", "a@example.com", "oldpassword1")
 	tok, err := auth.GeneratePasswordResetToken(u.ID.Hex(), testJWTSecret, 60)
 	if err != nil {
@@ -766,7 +929,7 @@ func TestResetPassword_Success(t *testing.T) {
 
 func TestResetPassword_InvalidToken(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig(), nil)
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), nil)
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -782,7 +945,7 @@ func TestResetPassword_InvalidToken(t *testing.T) {
 
 func TestResetPassword_ShortPassword(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig(), nil)
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), testConfig(), nil)
 	u := registerUser(t, h, "Alice", "a@example.com", "oldpassword1")
 	tok, err := auth.GeneratePasswordResetToken(u.ID.Hex(), testJWTSecret, 60)
 	if err != nil {
@@ -798,5 +961,122 @@ func TestResetPassword_ShortPassword(t *testing.T) {
 	h.ResetPassword(c)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRegister_EmailVerificationRequired_SendsVerificationMail(t *testing.T) {
+	store := newMockStore()
+	rec := &recordingMailer{}
+	cfg := testConfig()
+	cfg.EmailVerificationRequired = true
+	cfg.EmailVerificationFrontendURL = "http://localhost/verify-email"
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), cfg, rec)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/auth/register", bytes.NewReader([]byte(
+		`{"name":"Alice","email":"a@example.com","password":"password12"}`,
+	)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.Register(c)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	if rec.lastVerifyTo != "a@example.com" || !strings.Contains(rec.lastVerifyURL, "token=") {
+		t.Fatalf("verification mail: to=%q url=%q", rec.lastVerifyTo, rec.lastVerifyURL)
+	}
+	var resp models.RegisterResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.User.EmailVerified {
+		t.Error("expected email_verified false before verification")
+	}
+}
+
+func TestLogin_EmailNotVerified_Forbidden(t *testing.T) {
+	store := newMockStore()
+	rec := &recordingMailer{}
+	cfg := testConfig()
+	cfg.EmailVerificationRequired = true
+	cfg.EmailVerificationFrontendURL = "http://localhost/verify-email"
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), cfg, rec)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/auth/register", bytes.NewReader([]byte(
+		`{"name":"Alice","email":"a@example.com","password":"password12"}`,
+	)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.Register(c)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("register: %d %s", w.Code, w.Body.String())
+	}
+
+	w2 := httptest.NewRecorder()
+	c2, _ := gin.CreateTestContext(w2)
+	c2.Request = httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewReader([]byte(
+		`{"email":"a@example.com","password":"password12"}`,
+	)))
+	c2.Request.Header.Set("Content-Type", "application/json")
+	h.Login(c2)
+	if w2.Code != http.StatusForbidden {
+		t.Fatalf("login: status %d want 403, body %s", w2.Code, w2.Body.String())
+	}
+}
+
+func TestVerifyEmail_ThenLoginSucceeds(t *testing.T) {
+	store := newMockStore()
+	rec := &recordingMailer{}
+	cfg := testConfig()
+	cfg.EmailVerificationRequired = true
+	cfg.EmailVerificationFrontendURL = "http://localhost/verify-email"
+	h := handlers.NewUserHandler(store, newMapRefreshStore(), cfg, rec)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/auth/register", bytes.NewReader([]byte(
+		`{"name":"Alice","email":"a@example.com","password":"password12"}`,
+	)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.Register(c)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("register: %d %s", w.Code, w.Body.String())
+	}
+
+	uu, err := url.Parse(rec.lastVerifyURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok := uu.Query().Get("token")
+	if tok == "" {
+		t.Fatal("missing token in verification URL")
+	}
+
+	w2 := httptest.NewRecorder()
+	c2, _ := gin.CreateTestContext(w2)
+	c2.Request = httptest.NewRequest(http.MethodPost, "/auth/verify-email", bytes.NewReader([]byte(
+		`{"token":"`+tok+`"}`,
+	)))
+	c2.Request.Header.Set("Content-Type", "application/json")
+	h.VerifyEmail(c2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("verify: %d %s", w2.Code, w2.Body.String())
+	}
+
+	i := store.byEmail["a@example.com"]
+	if !store.users[i].EmailVerified {
+		t.Error("user should be marked verified in store")
+	}
+
+	w3 := httptest.NewRecorder()
+	c3, _ := gin.CreateTestContext(w3)
+	c3.Request = httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewReader([]byte(
+		`{"email":"a@example.com","password":"password12"}`,
+	)))
+	c3.Request.Header.Set("Content-Type", "application/json")
+	h.Login(c3)
+	if w3.Code != http.StatusOK {
+		t.Fatalf("login after verify: %d %s", w3.Code, w3.Body.String())
 	}
 }

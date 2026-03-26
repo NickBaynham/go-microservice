@@ -8,6 +8,14 @@ import (
 	"go-microservice/internal/mail"
 )
 
+func TestSendEmailVerification_LogsWithoutSMTP(t *testing.T) {
+	cfg := &config.Config{Env: "development", SMTPHost: ""}
+	s := mail.NewSender(cfg)
+	if err := s.SendEmailVerification(context.Background(), "u@example.com", "http://localhost/verify?token=x"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSendPasswordReset_LogsWithoutSMTP(t *testing.T) {
 	cfg := &config.Config{
 		Env:         "development",

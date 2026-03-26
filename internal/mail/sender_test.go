@@ -1,0 +1,36 @@
+package mail_test
+
+import (
+	"context"
+	"testing"
+
+	"go-microservice/internal/config"
+	"go-microservice/internal/mail"
+)
+
+func TestSendPasswordReset_LogsWithoutSMTP(t *testing.T) {
+	cfg := &config.Config{
+		Env:         "development",
+		SMTPHost:    "",
+		SMTPPort:    "",
+		SMTPFrom:    "",
+		SMTPUser:    "",
+		SMTPPassword: "",
+	}
+	s := mail.NewSender(cfg)
+	if err := s.SendPasswordReset(context.Background(), "u@example.com", "http://localhost/reset?token=x"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSendPasswordReset_ProductionWithoutSMTP(t *testing.T) {
+	cfg := &config.Config{
+		Env:      "production",
+		SMTPHost: "",
+	}
+	s := mail.NewSender(cfg)
+	err := s.SendPasswordReset(context.Background(), "u@example.com", "http://app/reset?token=x")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}

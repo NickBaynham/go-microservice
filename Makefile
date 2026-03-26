@@ -1,8 +1,9 @@
-.PHONY: help setup check-go check-brew install-go install-swag env deps run build clean \
+.PHONY: help setup check-go check-brew install-go install-swag env deps run dev build clean \
         docker-up docker-down docker-prod-up docker-prod-down \
         docker-test-up docker-test-down \
         certs certs-trust certs-check certs-clean \
-        test test-unit test-integration test-integration-local docs lint route53-alias route53-alias-delete
+        test test-unit test-integration test-integration-local docs lint route53-alias route53-alias-delete \
+        frontend-install frontend-build frontend-dev e2e-up e2e e2e-docker e2e-down
 
 GOMIN        := 1.22
 GOROOT_BREW  := $(shell brew --prefix go 2>/dev/null)/bin/go
@@ -142,6 +143,29 @@ run: check-go env certs docs
 	@echo "  ✔ Swagger UI: https://localhost:8443/swagger/index.html"
 	@go run $(CMD)
 
+## dev: Run API (HTTP :8080) + Vite dev server; Ctrl+C stops both (MongoDB must match .env)
+dev: check-go env docs
+	@if [ ! -f frontend/.env.local ] && [ -f frontend/.env.example ]; then \
+		cp frontend/.env.example frontend/.env.local; \
+		echo "  ✔ Created frontend/.env.local"; \
+	fi
+	@if [ ! -d frontend/node_modules ]; then \
+		echo "→ npm ci (frontend)..."; \
+		cd frontend && npm ci; \
+	fi
+	@echo "→ Starting API + Vite..."
+	@echo "  ✔ API http://localhost:8080   SPA http://localhost:5173"
+	@echo "  ℹ️  Ensure MongoDB is running (MONGO_URI in .env)"
+	@bash -c '\
+		LISTEN_HTTP=true PORT=8080 go run $(CMD) & \
+		pid1=$$!; \
+		(cd frontend && npm run dev) & \
+		pid2=$$!; \
+		cleanup() { kill $$pid1 $$pid2 2>/dev/null || true; }; \
+		trap cleanup INT TERM EXIT; \
+		wait $$pid1 $$pid2; \
+		trap - INT TERM EXIT'
+
 ## build: Build the binary
 build: check-go docs
 	@echo "→ Building $(APP)..."
@@ -273,6 +297,44 @@ docker-test-down:
 	@echo "→ Stopping test Docker environment..."
 	@docker compose -f deployments/docker-compose.test.yml down
 	@echo "  ✔ Done"
+
+
+# ── Frontend (Vite + React) & Playwright E2E ─────────────────────────────────
+
+## frontend-install: npm ci in frontend/
+frontend-install:
+	@echo "→ npm ci (frontend)..."
+	@cd frontend && npm ci
+	@echo "  ✔ Done"
+
+## frontend-build: Production build (set VITE_API_BASE_URL for API origin)
+frontend-build: frontend-install
+	@echo "→ Building frontend..."
+	@cd frontend && npm run build
+	@echo "  ✔ dist/ in frontend/"
+
+## frontend-dev: Vite dev server (run API separately; see frontend/README.md)
+frontend-dev:
+	@cd frontend && npm run dev
+
+## e2e-up: Start API + Mongo + SPA for Playwright (published ports 18080 / 14173)
+e2e-up:
+	@echo "→ Starting E2E stack..."
+	@docker compose -f deployments/docker-compose.e2e.yml up -d --build
+	@echo "  ✔ API http://127.0.0.1:18080  Web http://127.0.0.1:14173"
+
+## e2e-down: Stop E2E stack and remove volumes
+e2e-down:
+	@docker compose -f deployments/docker-compose.e2e.yml down -v
+
+## e2e: Run Playwright on host against e2e-up stack (requires e2e-up first)
+e2e: frontend-install
+	@cd frontend && npx playwright install chromium
+	@cd frontend && E2E_BASE_URL=http://127.0.0.1:14173 E2E_SKIP_WEB_SERVER=1 E2E_API_BASE_URL=http://127.0.0.1:18080 npm run test:e2e
+
+## e2e-docker: Playwright inside Docker (rebuilds SPA with api-e2e hostname)
+e2e-docker:
+	@docker compose -f deployments/docker-compose.e2e.yml -f deployments/docker-compose.e2e.runner.yml up --build --abort-on-container-exit playwright-runner
 
 
 # ── AWS / CDK ─────────────────────────────────────────────────────────────────

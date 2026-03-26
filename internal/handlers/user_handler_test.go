@@ -7,9 +7,11 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"go-microservice/internal/auth"
 	"go-microservice/internal/config"
 	"go-microservice/internal/handlers"
 	"go-microservice/internal/models"
@@ -26,9 +28,11 @@ const testJWTSecret = "unit-test-jwt-secret-must-be-32chars!"
 
 func testConfig() *config.Config {
 	return &config.Config{
-		JWTSecret:      testJWTSecret,
-		JWTExpireHours: "24",
-		Env:            "development",
+		JWTSecret:                 testJWTSecret,
+		JWTExpireHours:            "24",
+		Env:                       "development",
+		PasswordResetFrontendURL:  "http://localhost:5173/reset-password",
+		PasswordResetTokenMinutes: 60,
 	}
 }
 
@@ -131,6 +135,9 @@ func (m *mockUserStore) Update(ctx context.Context, id string, update bson.M) (*
 	if v, ok := update["role"].(string); ok {
 		u.Role = v
 	}
+	if v, ok := update["password"].(string); ok {
+		u.Password = v
+	}
 	m.users[idx] = *u
 	return u, nil
 }
@@ -176,7 +183,7 @@ func registerUser(t *testing.T, h *handlers.UserHandler, name, email, password s
 
 func TestRegister_FirstUserBecomesAdmin(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig())
+	h := handlers.NewUserHandler(store, testConfig(), nil)
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -200,7 +207,7 @@ func TestRegister_FirstUserBecomesAdmin(t *testing.T) {
 
 func TestRegister_SecondUserIsUser(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig())
+	h := handlers.NewUserHandler(store, testConfig(), nil)
 
 	first := `{"name":"Admin","email":"admin@example.com","password":"password12"}`
 	w1 := httptest.NewRecorder()
@@ -233,7 +240,7 @@ func TestRegister_SecondUserIsUser(t *testing.T) {
 
 func TestRegister_DuplicateEmail(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig())
+	h := handlers.NewUserHandler(store, testConfig(), nil)
 	payload := []byte(`{"name":"Alice","email":"dup@example.com","password":"password12"}`)
 
 	for i := 0; i < 2; i++ {
@@ -254,7 +261,7 @@ func TestRegister_DuplicateEmail(t *testing.T) {
 func TestRegister_CountError(t *testing.T) {
 	store := newMockStore()
 	store.countErr = errors.New("database unavailable")
-	h := handlers.NewUserHandler(store, testConfig())
+	h := handlers.NewUserHandler(store, testConfig(), nil)
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -270,7 +277,7 @@ func TestRegister_CountError(t *testing.T) {
 
 func TestLogin_Success(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig())
+	h := handlers.NewUserHandler(store, testConfig(), nil)
 	u := registerUser(t, h, "Alice", "alice@example.com", "secretpass99")
 
 	w := httptest.NewRecorder()
@@ -297,7 +304,7 @@ func TestLogin_Success(t *testing.T) {
 
 func TestLogin_WrongPassword(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig())
+	h := handlers.NewUserHandler(store, testConfig(), nil)
 	registerUser(t, h, "Alice", "alice@example.com", "rightpass")
 
 	w := httptest.NewRecorder()
@@ -314,7 +321,7 @@ func TestLogin_WrongPassword(t *testing.T) {
 
 func TestLogin_UnknownEmail(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig())
+	h := handlers.NewUserHandler(store, testConfig(), nil)
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -332,7 +339,7 @@ func TestLogin_TokenGenerationFailure(t *testing.T) {
 	store := newMockStore()
 	cfg := testConfig()
 	cfg.JWTExpireHours = "not-a-number"
-	h := handlers.NewUserHandler(store, cfg)
+	h := handlers.NewUserHandler(store, cfg, nil)
 	registerUser(t, h, "Alice", "alice@example.com", "password12")
 
 	w := httptest.NewRecorder()
@@ -349,7 +356,7 @@ func TestLogin_TokenGenerationFailure(t *testing.T) {
 
 func TestGetMe_Success(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig())
+	h := handlers.NewUserHandler(store, testConfig(), nil)
 	u := registerUser(t, h, "Me", "me@example.com", "password12")
 
 	w := httptest.NewRecorder()
@@ -371,7 +378,7 @@ func TestGetMe_Success(t *testing.T) {
 
 func TestGetMe_NotFound(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig())
+	h := handlers.NewUserHandler(store, testConfig(), nil)
 	fakeID := primitive.NewObjectID().Hex()
 
 	w := httptest.NewRecorder()
@@ -386,7 +393,7 @@ func TestGetMe_NotFound(t *testing.T) {
 
 func TestListUsers_Success(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig())
+	h := handlers.NewUserHandler(store, testConfig(), nil)
 	registerUser(t, h, "Alice", "a@example.com", "password12")
 
 	w := httptest.NewRecorder()
@@ -408,7 +415,7 @@ func TestListUsers_Success(t *testing.T) {
 func TestListUsers_RepositoryError(t *testing.T) {
 	store := newMockStore()
 	store.findAllErr = errors.New("db error")
-	h := handlers.NewUserHandler(store, testConfig())
+	h := handlers.NewUserHandler(store, testConfig(), nil)
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -421,7 +428,7 @@ func TestListUsers_RepositoryError(t *testing.T) {
 
 func TestGetUser_Success(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig())
+	h := handlers.NewUserHandler(store, testConfig(), nil)
 	u := registerUser(t, h, "Bob", "bob@example.com", "password12")
 
 	w := httptest.NewRecorder()
@@ -436,7 +443,7 @@ func TestGetUser_Success(t *testing.T) {
 
 func TestGetUser_NotFound(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig())
+	h := handlers.NewUserHandler(store, testConfig(), nil)
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -450,7 +457,7 @@ func TestGetUser_NotFound(t *testing.T) {
 
 func TestUpdateUser_ForbiddenWhenNotSelfAndNotAdmin(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig())
+	h := handlers.NewUserHandler(store, testConfig(), nil)
 	admin := registerUser(t, h, "Admin", "admin@example.com", "password12")
 	user := registerUser(t, h, "User", "user@example.com", "password12")
 
@@ -469,7 +476,7 @@ func TestUpdateUser_ForbiddenWhenNotSelfAndNotAdmin(t *testing.T) {
 
 func TestUpdateUser_Self(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig())
+	h := handlers.NewUserHandler(store, testConfig(), nil)
 	u := registerUser(t, h, "Old", "self@example.com", "password12")
 
 	w := httptest.NewRecorder()
@@ -487,7 +494,7 @@ func TestUpdateUser_Self(t *testing.T) {
 
 func TestUpdateUser_AdminSetsRole(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig())
+	h := handlers.NewUserHandler(store, testConfig(), nil)
 	registerUser(t, h, "Admin", "admin@example.com", "password12")
 	target := registerUser(t, h, "User", "user@example.com", "password12")
 
@@ -513,7 +520,7 @@ func TestUpdateUser_AdminSetsRole(t *testing.T) {
 
 func TestUpdateUser_NonAdminCannotSetRole(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig())
+	h := handlers.NewUserHandler(store, testConfig(), nil)
 	registerUser(t, h, "Admin", "admin@example.com", "password12")
 	u := registerUser(t, h, "User", "user@example.com", "password12")
 
@@ -533,7 +540,7 @@ func TestUpdateUser_NonAdminCannotSetRole(t *testing.T) {
 
 func TestUpdateUser_DuplicateEmail(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig())
+	h := handlers.NewUserHandler(store, testConfig(), nil)
 	registerUser(t, h, "Admin", "admin@example.com", "password12")
 	registerUser(t, h, "Alice", "a@example.com", "password12")
 	b := registerUser(t, h, "Bob", "b@example.com", "password12")
@@ -553,7 +560,7 @@ func TestUpdateUser_DuplicateEmail(t *testing.T) {
 
 func TestUpdateUser_NoFields(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig())
+	h := handlers.NewUserHandler(store, testConfig(), nil)
 	u := registerUser(t, h, "Solo", "solo@example.com", "password12")
 
 	w := httptest.NewRecorder()
@@ -571,7 +578,7 @@ func TestUpdateUser_NoFields(t *testing.T) {
 
 func TestDeleteUser_Success(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig())
+	h := handlers.NewUserHandler(store, testConfig(), nil)
 	registerUser(t, h, "Admin", "admin@example.com", "password12")
 	victim := registerUser(t, h, "Victim", "v@example.com", "password12")
 
@@ -587,7 +594,7 @@ func TestDeleteUser_Success(t *testing.T) {
 
 func TestDeleteUser_NotFound(t *testing.T) {
 	store := newMockStore()
-	h := handlers.NewUserHandler(store, testConfig())
+	h := handlers.NewUserHandler(store, testConfig(), nil)
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -597,5 +604,199 @@ func TestDeleteUser_NotFound(t *testing.T) {
 	h.DeleteUser(c)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("status: got %d, want 404", w.Code)
+	}
+}
+
+type recordingMailer struct {
+	lastTo   string
+	lastURL  string
+	sendErr  error
+}
+
+func (r *recordingMailer) SendPasswordReset(_ context.Context, to, resetURL string) error {
+	if r.sendErr != nil {
+		return r.sendErr
+	}
+	r.lastTo = to
+	r.lastURL = resetURL
+	return nil
+}
+
+func TestForgotPassword_UnknownEmail_Still200(t *testing.T) {
+	store := newMockStore()
+	rec := &recordingMailer{}
+	h := handlers.NewUserHandler(store, testConfig(), rec)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/auth/forgot-password", bytes.NewReader([]byte(
+		`{"email":"nobody@example.com"}`,
+	)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.ForgotPassword(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	if rec.lastURL != "" {
+		t.Error("mailer should not run for unknown email")
+	}
+}
+
+func TestForgotPassword_SendsMailWhenUserExists(t *testing.T) {
+	store := newMockStore()
+	rec := &recordingMailer{}
+	h := handlers.NewUserHandler(store, testConfig(), rec)
+	registerUser(t, h, "Alice", "a@example.com", "password12")
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/auth/forgot-password", bytes.NewReader([]byte(
+		`{"email":"a@example.com"}`,
+	)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.ForgotPassword(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	if rec.lastTo != "a@example.com" || !strings.Contains(rec.lastURL, "token=") {
+		t.Fatalf("mailer: to=%q url=%q", rec.lastTo, rec.lastURL)
+	}
+}
+
+func TestForgotPassword_ProductionWithoutSMTP_503(t *testing.T) {
+	store := newMockStore()
+	cfg := testConfig()
+	cfg.Env = "production"
+	h := handlers.NewUserHandler(store, cfg, &recordingMailer{})
+	registerUser(t, h, "Alice", "a@example.com", "password12")
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/auth/forgot-password", bytes.NewReader([]byte(
+		`{"email":"a@example.com"}`,
+	)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.ForgotPassword(c)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestForgotPassword_MailerError_500(t *testing.T) {
+	store := newMockStore()
+	rec := &recordingMailer{sendErr: errors.New("smtp down")}
+	h := handlers.NewUserHandler(store, testConfig(), rec)
+	registerUser(t, h, "Alice", "a@example.com", "password12")
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/auth/forgot-password", bytes.NewReader([]byte(
+		`{"email":"a@example.com"}`,
+	)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.ForgotPassword(c)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestForgotPassword_TestEnvIncludesResetToken(t *testing.T) {
+	store := newMockStore()
+	cfg := testConfig()
+	cfg.Env = "test"
+	h := handlers.NewUserHandler(store, cfg, &recordingMailer{})
+	u := registerUser(t, h, "Alice", "a@example.com", "password12")
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/auth/forgot-password", bytes.NewReader([]byte(
+		`{"email":"a@example.com"}`,
+	)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.ForgotPassword(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	var resp models.ForgotPasswordResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.ResetToken == nil || *resp.ResetToken == "" {
+		t.Fatal("expected reset_token in test env")
+	}
+	tok, err := auth.ValidatePasswordResetToken(*resp.ResetToken, testJWTSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok != u.ID.Hex() {
+		t.Fatalf("token subject: got %q want %q", tok, u.ID.Hex())
+	}
+}
+
+func TestResetPassword_Success(t *testing.T) {
+	store := newMockStore()
+	h := handlers.NewUserHandler(store, testConfig(), nil)
+	u := registerUser(t, h, "Alice", "a@example.com", "oldpassword1")
+	tok, err := auth.GeneratePasswordResetToken(u.ID.Hex(), testJWTSecret, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	body := `{"token":"` + tok + `","password":"newpassword1"}`
+	c.Request = httptest.NewRequest(http.MethodPost, "/auth/reset-password", bytes.NewReader([]byte(body)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.ResetPassword(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+
+	w2 := httptest.NewRecorder()
+	c2, _ := gin.CreateTestContext(w2)
+	c2.Request = httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewReader([]byte(
+		`{"email":"a@example.com","password":"newpassword1"}`,
+	)))
+	c2.Request.Header.Set("Content-Type", "application/json")
+	h.Login(c2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("login after reset: %d %s", w2.Code, w2.Body.String())
+	}
+}
+
+func TestResetPassword_InvalidToken(t *testing.T) {
+	store := newMockStore()
+	h := handlers.NewUserHandler(store, testConfig(), nil)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/auth/reset-password", bytes.NewReader([]byte(
+		`{"token":"not-a-valid-reset-jwt","password":"newpassword1"}`,
+	)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.ResetPassword(c)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestResetPassword_ShortPassword(t *testing.T) {
+	store := newMockStore()
+	h := handlers.NewUserHandler(store, testConfig(), nil)
+	u := registerUser(t, h, "Alice", "a@example.com", "oldpassword1")
+	tok, err := auth.GeneratePasswordResetToken(u.ID.Hex(), testJWTSecret, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/auth/reset-password", bytes.NewReader([]byte(
+		`{"token":"`+tok+`","password":"short"}`,
+	)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.ResetPassword(c)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
 	}
 }

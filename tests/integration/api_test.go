@@ -13,6 +13,8 @@
 //	JWT_SECRET             Must match the server (default change-me-in-production; Docker test uses test-jwt-secret-do-not-use-in-prod)
 //	TEST_HTTP_BASE_URL     Optional e.g. http://localhost:8080 — runs an extra /health check over plain HTTP
 //	TEST_SKIP_RATE_LIMIT   If set (any value), skip the rate-limit subtest at the end of the suite
+//
+// Password reset: POST /auth/forgot-password and /auth/reset-password are covered in TestAPI. Reset uses JWTs signed with JWT_SECRET (same as access tokens, different claims).
 //	TEST_SERVER_WAIT_SEC   How long to poll /health before failing (default 30)
 //	TEST_SKIP_FULL_DB_RESET  If set, do not delete all users in MONGO_DB before tests (only use if you know the DB is already empty; otherwise first-user admin tests fail)
 //
@@ -426,6 +428,95 @@ func TestAPI(t *testing.T) {
 		})
 		assertStatus(t, r.StatusCode, http.StatusBadRequest, r)
 		assertKey(t, r, "error")
+	})
+
+	// ── Password reset ────────────────────────────────────────────────────────
+
+	t.Run("POST /auth/forgot-password returns 200 for unknown email", func(t *testing.T) {
+		r := do(t, client, http.MethodPost, cfg.BaseURL+"/auth/forgot-password", "", map[string]any{
+			"email": "ghost+" + runID + "@test.com",
+		})
+		assertStatus(t, r.StatusCode, http.StatusOK, r)
+		assertStringField(t, r, "message", "If an account exists for this email, you will receive reset instructions.")
+		if _, has := r.Body["reset_token"]; has {
+			t.Error("reset_token must not appear when email is unknown")
+		}
+	})
+
+	t.Run("POST /auth/reset-password updates password and login works", func(t *testing.T) {
+		if userID == "" {
+			t.Skip("userID not set")
+		}
+		secret := getEnv("JWT_SECRET", "change-me-in-production")
+		tok, err := auth.GeneratePasswordResetToken(userID, secret, 60)
+		if err != nil {
+			t.Fatalf("GeneratePasswordResetToken: %v", err)
+		}
+		newPass := "resetpass-xyz-99"
+		r := do(t, client, http.MethodPost, cfg.BaseURL+"/auth/reset-password", "", map[string]any{
+			"token":    tok,
+			"password": newPass,
+		})
+		assertStatus(t, r.StatusCode, http.StatusOK, r)
+		assertStringField(t, r, "message", "password updated successfully")
+
+		login := do(t, client, http.MethodPost, cfg.BaseURL+"/auth/login", "", map[string]any{
+			"email":    userEmail,
+			"password": newPass,
+		})
+		assertStatus(t, login.StatusCode, http.StatusOK, login)
+		// restore userPass for later subtests
+		tok2, err := auth.GeneratePasswordResetToken(userID, secret, 60)
+		if err != nil {
+			t.Fatalf("GeneratePasswordResetToken: %v", err)
+		}
+		back := do(t, client, http.MethodPost, cfg.BaseURL+"/auth/reset-password", "", map[string]any{
+			"token":    tok2,
+			"password": userPass,
+		})
+		assertStatus(t, back.StatusCode, http.StatusOK, back)
+	})
+
+	t.Run("POST /auth/reset-password rejects invalid token", func(t *testing.T) {
+		r := do(t, client, http.MethodPost, cfg.BaseURL+"/auth/reset-password", "", map[string]any{
+			"token":    "totally-not-a-reset-token",
+			"password": "validpass9",
+		})
+		assertStatus(t, r.StatusCode, http.StatusBadRequest, r)
+		assertKey(t, r, "error")
+	})
+
+	t.Run("POST /auth/reset-password rejects short password", func(t *testing.T) {
+		if userID == "" {
+			t.Skip("userID not set")
+		}
+		secret := getEnv("JWT_SECRET", "change-me-in-production")
+		tok, err := auth.GeneratePasswordResetToken(userID, secret, 60)
+		if err != nil {
+			t.Fatalf("GeneratePasswordResetToken: %v", err)
+		}
+		r := do(t, client, http.MethodPost, cfg.BaseURL+"/auth/reset-password", "", map[string]any{
+			"token":    tok,
+			"password": "short",
+		})
+		assertStatus(t, r.StatusCode, http.StatusBadRequest, r)
+		assertKey(t, r, "error")
+	})
+
+	t.Run("POST /auth/forgot-password exposes reset_token when server ENV=test", func(t *testing.T) {
+		em := email("forgot-test-env")
+		reg := do(t, client, http.MethodPost, cfg.BaseURL+"/auth/register", "", map[string]any{
+			"name": "Forgot Test", "email": em, "password": "forgotpass1",
+		})
+		assertStatus(t, reg.StatusCode, http.StatusCreated, reg)
+		r := do(t, client, http.MethodPost, cfg.BaseURL+"/auth/forgot-password", "", map[string]any{
+			"email": em,
+		})
+		assertStatus(t, r.StatusCode, http.StatusOK, r)
+		tok, ok := r.Body["reset_token"].(string)
+		if !ok || tok == "" {
+			t.Skip("reset_token not in JSON (server is not ENV=test — expected for local development HTTPS)")
+		}
 	})
 
 	// ── GET /me ───────────────────────────────────────────────────────────────

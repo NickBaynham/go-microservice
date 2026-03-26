@@ -28,12 +28,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	swaggerfiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
 	"go-microservice/docs"
 	"go-microservice/internal/config"
 	"go-microservice/internal/handlers"
+	"go-microservice/internal/mail"
 	"go-microservice/internal/middleware"
 	"go-microservice/internal/repository"
 	appTLS "go-microservice/internal/tls"
@@ -72,12 +74,26 @@ func main() {
 
 	// Wire up dependencies
 	userRepo := repository.NewUserRepository(db)
-	userHandler := handlers.NewUserHandler(userRepo, cfg)
+	mailSender := mail.NewSender(cfg)
+	userHandler := handlers.NewUserHandler(userRepo, cfg, mailSender)
 	healthHandler := handlers.NewHealthHandler(mongoClient)
 
 	// Router
 	r := gin.Default()
 	r.SetTrustedProxies(nil) //nolint:errcheck
+
+	if len(cfg.CORSAllowedOrigins) > 0 {
+		r.Use(cors.New(cors.Config{
+			AllowOrigins:     cfg.CORSAllowedOrigins,
+			AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"},
+			AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
+			ExposeHeaders:    []string{"Content-Length"},
+			AllowCredentials: false,
+			MaxAge:           86400,
+		}))
+	} else if cfg.IsProduction() {
+		log.Println("CORS_ALLOWED_ORIGINS not set — cross-origin browser requests to this API will fail until you set it (e.g. https://app.example.com)")
+	}
 
 	// Swagger UI (disable in production)
 	if !cfg.IsProduction() {
@@ -94,8 +110,12 @@ func main() {
 	// Separate buckets so a login flood (e.g. integration tests) does not block registration.
 	registerLimit := middleware.PerIPRateLimit(rate.Every(2*time.Second), 15)
 	loginLimit := middleware.PerIPRateLimit(rate.Every(2*time.Second), 15)
+	forgotLimit := middleware.PerIPRateLimit(rate.Every(1*time.Minute), 8)
+	resetLimit := middleware.PerIPRateLimit(rate.Every(1*time.Second), 30)
 	r.POST("/auth/register", registerLimit, userHandler.Register)
 	r.POST("/auth/login", loginLimit, userHandler.Login)
+	r.POST("/auth/forgot-password", forgotLimit, userHandler.ForgotPassword)
+	r.POST("/auth/reset-password", resetLimit, userHandler.ResetPassword)
 
 	// Protected routes
 	protected := r.Group("/")

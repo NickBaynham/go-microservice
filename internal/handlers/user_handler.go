@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"go-microservice/internal/auth"
@@ -13,6 +15,15 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"golang.org/x/crypto/bcrypt"
 )
+
+// PasswordResetMailer delivers the password-reset link (e.g. SMTP or log).
+type PasswordResetMailer interface {
+	SendPasswordReset(ctx context.Context, toEmail, resetURL string) error
+}
+
+type noopMailer struct{}
+
+func (noopMailer) SendPasswordReset(context.Context, string, string) error { return nil }
 
 type userStore interface {
 	Count(ctx context.Context) (int64, error)
@@ -25,12 +36,21 @@ type userStore interface {
 }
 
 type UserHandler struct {
-	repo userStore
-	cfg  *config.Config
+	repo   userStore
+	cfg    *config.Config
+	mailer PasswordResetMailer
 }
 
-func NewUserHandler(repo userStore, cfg *config.Config) *UserHandler {
-	return &UserHandler{repo: repo, cfg: cfg}
+func NewUserHandler(repo userStore, cfg *config.Config, mailer PasswordResetMailer) *UserHandler {
+	if mailer == nil {
+		mailer = noopMailer{}
+	}
+	return &UserHandler{repo: repo, cfg: cfg, mailer: mailer}
+}
+
+func passwordResetLink(base, token string) string {
+	b := strings.TrimSuffix(strings.TrimSpace(base), "/")
+	return b + "?token=" + url.QueryEscape(token)
 }
 
 // Register godoc
@@ -125,6 +145,101 @@ func (h *UserHandler) Login(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, models.LoginResponse{Token: token, User: *user})
+}
+
+const forgotPasswordAck = "If an account exists for this email, you will receive reset instructions."
+
+// ForgotPassword godoc
+// @Summary      Request password reset
+// @Description  Sends a reset link to the email when an account exists. Always returns the same message (does not reveal whether the email is registered). In production, SMTP and PASSWORD_RESET_FRONTEND_URL must be configured.
+// @Tags         auth
+// @Accept       json
+// @Produce      json
+// @Param        body  body      models.ForgotPasswordRequest  true  "Email address"
+// @Success      200   {object}  models.ForgotPasswordResponse
+// @Failure      400   {object}  models.ErrorResponse
+// @Failure      503   {object}  models.ErrorResponse  "Password reset not configured (production)"
+// @Failure      500   {object}  models.ErrorResponse
+// @Router       /auth/forgot-password [post]
+func (h *UserHandler) ForgotPassword(c *gin.Context) {
+	if h.cfg.IsProduction() {
+		if strings.TrimSpace(h.cfg.SMTPHost) == "" || strings.TrimSpace(h.cfg.PasswordResetFrontendURL) == "" {
+			c.JSON(http.StatusServiceUnavailable, models.ErrorResponse{
+				Error: "password reset is not configured (set SMTP_HOST, SMTP_FROM, and PASSWORD_RESET_FRONTEND_URL)",
+			})
+			return
+		}
+	}
+
+	var req models.ForgotPasswordRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
+		return
+	}
+
+	user, err := h.repo.FindByEmail(c.Request.Context(), req.Email)
+	if err != nil {
+		c.JSON(http.StatusOK, models.ForgotPasswordResponse{Message: forgotPasswordAck})
+		return
+	}
+
+	token, err := auth.GeneratePasswordResetToken(user.ID.Hex(), h.cfg.JWTSecret, h.cfg.PasswordResetTokenMinutes)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to generate reset token"})
+		return
+	}
+
+	link := passwordResetLink(h.cfg.PasswordResetFrontendURL, token)
+	if err := h.mailer.SendPasswordReset(c.Request.Context(), user.Email, link); err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to send reset email"})
+		return
+	}
+
+	resp := models.ForgotPasswordResponse{Message: forgotPasswordAck}
+	if h.cfg.IsTestEnv() {
+		resp.ResetToken = &token
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+// ResetPassword godoc
+// @Summary      Complete password reset
+// @Description  Sets a new password using the short-lived token from the reset email.
+// @Tags         auth
+// @Accept       json
+// @Produce      json
+// @Param        body  body      models.ResetPasswordRequest  true  "Token and new password"
+// @Success      200   {object}  models.MessageResponse
+// @Failure      400   {object}  models.ErrorResponse
+// @Failure      404   {object}  models.ErrorResponse
+// @Failure      500   {object}  models.ErrorResponse
+// @Router       /auth/reset-password [post]
+func (h *UserHandler) ResetPassword(c *gin.Context) {
+	var req models.ResetPasswordRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
+		return
+	}
+
+	userID, err := auth.ValidatePasswordResetToken(req.Token, h.cfg.JWTSecret)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid or expired reset token"})
+		return
+	}
+
+	hashed, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to hash password"})
+		return
+	}
+
+	_, err = h.repo.Update(c.Request.Context(), userID, bson.M{"password": string(hashed)})
+	if err != nil {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, models.MessageResponse{Message: "password updated successfully"})
 }
 
 // ListUsers godoc

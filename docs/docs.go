@@ -22,6 +22,58 @@ const docTemplate = `{
     "host": "{{.Host}}",
     "basePath": "{{.BasePath}}",
     "paths": {
+        "/auth/forgot-password": {
+            "post": {
+                "description": "Sends a reset link to the email when an account exists. Always returns the same message (does not reveal whether the email is registered). In production, SMTP and PASSWORD_RESET_FRONTEND_URL must be configured.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "auth"
+                ],
+                "summary": "Request password reset",
+                "parameters": [
+                    {
+                        "description": "Email address",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ForgotPasswordRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ForgotPasswordResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Password reset not configured (production)",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/auth/login": {
             "post": {
                 "description": "Authenticates a user and returns a signed JWT token.",
@@ -119,6 +171,58 @@ const docTemplate = `{
                     },
                     "500": {
                         "description": "Internal server error",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/auth/reset-password": {
+            "post": {
+                "description": "Sets a new password using the short-lived token from the reset email.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "auth"
+                ],
+                "summary": "Complete password reset",
+                "parameters": [
+                    {
+                        "description": "Token and new password",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ResetPasswordRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.MessageResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
                         "schema": {
                             "$ref": "#/definitions/go-microservice_internal_models.ErrorResponse"
                         }
@@ -445,6 +549,34 @@ const docTemplate = `{
                 }
             }
         },
+        "go-microservice_internal_models.ForgotPasswordRequest": {
+            "description": "Forgot-password request",
+            "type": "object",
+            "required": [
+                "email"
+            ],
+            "properties": {
+                "email": {
+                    "type": "string",
+                    "example": "alice@example.com"
+                }
+            }
+        },
+        "go-microservice_internal_models.ForgotPasswordResponse": {
+            "description": "Forgot-password response",
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "example": "If an account exists for this email, you will receive reset instructions."
+                },
+                "reset_token": {
+                    "description": "ResetToken is returned only when ENV=test (for automated E2E); never in production or development.",
+                    "type": "string",
+                    "example": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                }
+            }
+        },
         "go-microservice_internal_models.HealthResponse": {
             "description": "Health check response",
             "type": "object",
@@ -532,6 +664,25 @@ const docTemplate = `{
                 },
                 "user": {
                     "$ref": "#/definitions/go-microservice_internal_models.User"
+                }
+            }
+        },
+        "go-microservice_internal_models.ResetPasswordRequest": {
+            "description": "Reset-password request",
+            "type": "object",
+            "required": [
+                "password",
+                "token"
+            ],
+            "properties": {
+                "password": {
+                    "type": "string",
+                    "minLength": 8,
+                    "example": "newSecurePass1"
+                },
+                "token": {
+                    "type": "string",
+                    "example": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
                 }
             }
         },

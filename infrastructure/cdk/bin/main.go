@@ -2,11 +2,13 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"strconv"
+	"strings"
+
 	"github.com/aws/aws-cdk-go/awscdk/v2"
 	"github.com/aws/jsii-runtime-go"
 	"go-microservice-cdk/lib"
-	"os"
-	"strconv"
 )
 
 func main() {
@@ -24,6 +26,7 @@ func main() {
 	desiredCount := getFloat("CDK_DESIRED_COUNT", 1)
 	taskCpu := getFloat("CDK_TASK_CPU", 512)
 	taskMemory := getFloat("CDK_TASK_MEMORY", 1024)
+	corsOrigins := strings.TrimSpace(getEnv("CDK_CORS_ALLOWED_ORIGINS", ""))
 
 	lib.NewGoMicroserviceStack(app, fmt.Sprintf("GoMicroservice-%s", capitalize(environment)), &lib.GoMicroserviceStackProps{
 		StackProps: awscdk.StackProps{
@@ -42,9 +45,10 @@ func main() {
 		AppImage:          appImage,
 		JwtSecret:         jwtSecret,
 		AcmCertificateArn: certArn,
-		DesiredCount:      desiredCount,
-		TaskCpu:           taskCpu,
-		TaskMemory:        taskMemory,
+		DesiredCount:       desiredCount,
+		TaskCpu:            taskCpu,
+		TaskMemory:         taskMemory,
+		CORSAllowedOrigins: corsOrigins,
 	})
 
 	app.Synth(nil)

@@ -81,3 +81,24 @@ type RegisterResponse struct {
 	Message string `json:"message" example:"user registered successfully"`
 	User    User   `json:"user"`
 }
+
+// ForgotPasswordRequest asks for a reset email for the given address.
+// @Description Forgot-password request
+type ForgotPasswordRequest struct {
+	Email string `json:"email" binding:"required,email" example:"alice@example.com"`
+}
+
+// ForgotPasswordResponse acknowledges the request (same shape whether or not the email exists).
+// @Description Forgot-password response
+type ForgotPasswordResponse struct {
+	Message string `json:"message" example:"If an account exists for this email, you will receive reset instructions."`
+	// ResetToken is returned only when ENV=test (for automated E2E); never in production or development.
+	ResetToken *string `json:"reset_token,omitempty" example:"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."`
+}
+
+// ResetPasswordRequest completes a reset using the token from the email link.
+// @Description Reset-password request
+type ResetPasswordRequest struct {
+	Token    string `json:"token"    binding:"required" example:"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."`
+	Password string `json:"password" binding:"required,min=8" example:"newSecurePass1"`
+}

@@ -31,9 +31,11 @@ go-microservice/
 ### Public
 | Method | Path              | Description          |
 |--------|-------------------|----------------------|
-| GET    | /health           | Health check         |
-| POST   | /auth/register    | Register (first user becomes **admin**, rest are **user**; rate-limited) |
-| POST   | /auth/login       | Login & get JWT (rate-limited) |
+| GET    | /health               | Health check         |
+| POST   | /auth/register        | Register (first user becomes **admin**, rest are **user**; rate-limited) |
+| POST   | /auth/login           | Login & get JWT (rate-limited) |
+| POST   | /auth/forgot-password | Request password reset email (same response whether email exists; rate-limited) |
+| POST   | /auth/reset-password  | Set new password with short-lived token from email link (rate-limited) |
 
 ### Protected (JWT required)
 | Method | Path         | Description             |
@@ -159,6 +161,18 @@ These are usually set in **`.env`** (loaded at startup). Most map to `internal/c
 | TLS_CERT         | _(empty)_                 | Cert PEM path; empty + `production`/`prod` ⇒ HTTP on PORT (proxy terminates TLS) |
 | TLS_KEY          | _(empty)_                 | Key PEM path; same as TLS_CERT                   |
 | DOMAIN           | _(unset)_                 | Public **DNS apex** (e.g. `example.com`). Used by **`make route53-alias`** (`DNS_ZONE` defaults to this). Set the same name as GitHub repo Variable **`DOMAIN`** for CI hostnames. |
+| CORS_ALLOWED_ORIGINS | _(unset)_             | Comma-separated browser **Origin** values (`https://app.example.com`). In **development** / **test**, if unset, defaults include Vite `http://localhost:5173` and preview `4173`. In **production** / **prod**, unset ⇒ no CORS middleware (set for SPAs). |
+| PASSWORD_RESET_FRONTEND_URL | _(see below)_ | Base URL of the SPA **reset-password** page (no trailing slash). In **development** / **test**, defaults to `http://localhost:5173/reset-password` when unset. In **production** / **prod**, must be set for password reset emails to contain a valid link. |
+| PASSWORD_RESET_TOKEN_MINUTES | `60` | Lifetime of the signed reset token (1–10080). |
+| SMTP_HOST / SMTP_PORT | _(empty)_ | When set (with **SMTP_FROM**), forgot-password sends mail via SMTP. **Required** for forgot-password in **production** / **prod** (otherwise the API returns **503**). |
+| SMTP_USER / SMTP_PASSWORD | _(empty)_ | SMTP auth (optional for open relays). |
+| SMTP_FROM | _(empty)_ | `From` address for reset emails; required when **SMTP_HOST** is set. |
+
+**Note:** When **`ENV=test`**, successful forgot-password responses may include **`reset_token`** in JSON for automated E2E only. This field is **never** returned in development or production.
+
+### Web UI (React)
+
+The **`frontend/`** app talks to this API over HTTPS or HTTP. See **[frontend/README.md](frontend/README.md)** for local dev, production build, and **Playwright** E2E (local host, Docker Compose, or self-signed HTTPS). **End-user help** (signup, login, forgot password): **[docs/END_USER_GUIDE.md](docs/END_USER_GUIDE.md)**.
 
 Registration ignores any client-supplied role: the **first** account in the database is **`admin`**, every later signup is **`user`**.
 

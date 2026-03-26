@@ -38,3 +38,8 @@ infrastructure/cdk/cdk.context.json
 infrastructure/cdk/cdk.out/
 infrastructure/cdk/cdk.context.json
 
+frontend/node_modules/
+frontend/dist/
+frontend/playwright-report/
+frontend/test-results/
+

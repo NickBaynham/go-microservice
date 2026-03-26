@@ -26,6 +26,27 @@ definitions:
         example: invalid credentials
         type: string
     type: object
+  go-microservice_internal_models.ForgotPasswordRequest:
+    description: Forgot-password request
+    properties:
+      email:
+        example: alice@example.com
+        type: string
+    required:
+    - email
+    type: object
+  go-microservice_internal_models.ForgotPasswordResponse:
+    description: Forgot-password response
+    properties:
+      message:
+        example: If an account exists for this email, you will receive reset instructions.
+        type: string
+      reset_token:
+        description: ResetToken is returned only when ENV=test (for automated E2E);
+          never in production or development.
+        example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+        type: string
+    type: object
   go-microservice_internal_models.HealthResponse:
     description: Health check response
     properties:
@@ -89,6 +110,20 @@ definitions:
       user:
         $ref: '#/definitions/go-microservice_internal_models.User'
     type: object
+  go-microservice_internal_models.ResetPasswordRequest:
+    description: Reset-password request
+    properties:
+      password:
+        example: newSecurePass1
+        minLength: 8
+        type: string
+      token:
+        example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+        type: string
+    required:
+    - password
+    - token
+    type: object
   go-microservice_internal_models.UpdateUserRequest:
     description: Update request body (all fields optional)
     properties:
@@ -137,6 +172,42 @@ info:
   title: go-microservice API
   version: "1.0"
 paths:
+  /auth/forgot-password:
+    post:
+      consumes:
+      - application/json
+      description: Sends a reset link to the email when an account exists. Always
+        returns the same message (does not reveal whether the email is registered).
+        In production, SMTP and PASSWORD_RESET_FRONTEND_URL must be configured.
+      parameters:
+      - description: Email address
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/go-microservice_internal_models.ForgotPasswordRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ForgotPasswordResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "503":
+          description: Password reset not configured (production)
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+      summary: Request password reset
+      tags:
+      - auth
   /auth/login:
     post:
       consumes:
@@ -204,6 +275,41 @@ paths:
           schema:
             $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
       summary: Register a new user
+      tags:
+      - auth
+  /auth/reset-password:
+    post:
+      consumes:
+      - application/json
+      description: Sets a new password using the short-lived token from the reset
+        email.
+      parameters:
+      - description: Token and new password
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/go-microservice_internal_models.ResetPasswordRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.MessageResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/go-microservice_internal_models.ErrorResponse'
+      summary: Complete password reset
       tags:
       - auth
   /health:

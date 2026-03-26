@@ -1,0 +1,61 @@
+# API + Mongo + prebuilt SPA for Playwright E2E.
+# From repo root:
+#   docker compose -f deployments/docker-compose.e2e.yml up -d --build
+# Then from host (API on 18080, web on 14173):
+#   cd frontend && npm ci && npx playwright install chromium
+#   E2E_BASE_URL=http://127.0.0.1:14173 E2E_SKIP_WEB_SERVER=1 E2E_API_BASE_URL=http://127.0.0.1:18080 npm run test:e2e
+#
+# For Playwright inside Docker (browser must resolve API by service name), use:
+#   docker compose -f deployments/docker-compose.e2e.yml -f deployments/docker-compose.e2e.runner.yml up --build --abort-on-container-exit playwright-runner
+
+services:
+  mongo-e2e:
+    image: mongo:7
+    tmpfs:
+      - /data/db
+    healthcheck:
+      test: ['CMD', 'mongosh', '--eval', "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: 'no'
+
+  api-e2e:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    ports:
+      - '18080:8080'
+    environment:
+      LISTEN_HTTP: 'true'
+      PORT: '8080'
+      MONGO_URI: mongodb://mongo-e2e:27017
+      MONGO_DB: userservice_e2e
+      ENV: test
+      JWT_SECRET: test-jwt-secret-do-not-use-in-prod
+      JWT_EXPIRE_HOURS: '24'
+      CORS_ALLOWED_ORIGINS: 'http://127.0.0.1:4173,http://localhost:4173,http://127.0.0.1:14173,http://localhost:14173'
+      PASSWORD_RESET_FRONTEND_URL: 'http://127.0.0.1:14173/reset-password'
+    depends_on:
+      mongo-e2e:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:8080/health']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    restart: 'no'
+
+  web-e2e:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile.frontend
+      args:
+        VITE_API_BASE_URL: http://127.0.0.1:18080
+    ports:
+      - '14173:4173'
+    depends_on:
+      api-e2e:
+        condition: service_healthy
+    restart: 'no'

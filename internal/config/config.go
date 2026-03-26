@@ -19,6 +19,19 @@ type Config struct {
 	JWTSecret      string
 	JWTExpireHours string
 
+	// Password reset (JWT link in email when SMTP is configured; required for forgot-password in production).
+	PasswordResetFrontendURL  string
+	PasswordResetTokenMinutes int
+
+	SMTPHost     string
+	SMTPPort     string
+	SMTPUser     string
+	SMTPPassword string
+	SMTPFrom     string
+
+	// CORS — browser Origin values (scheme://host:port). See CORSAllowedOriginsFromEnv.
+	CORSAllowedOrigins []string
+
 	// TLS
 	Env     string // "development", "test", "production"
 	TLSCert string // path to cert PEM  (prod: set by certbot; dev: auto-generated)
@@ -29,6 +42,11 @@ type Config struct {
 // Accepts both "production" (e.g. docker-compose) and "prod" (CDK).
 func (c *Config) IsProduction() bool {
 	return isProductionLike(c.Env)
+}
+
+// IsTestEnv is true when ENV=test (used only for automated tests, e.g. optional reset_token in API responses).
+func (c *Config) IsTestEnv() bool {
+	return strings.EqualFold(strings.TrimSpace(c.Env), "test")
 }
 
 // ServeHTTPOnly is true when TLS terminates at a reverse proxy (nginx, ALB) and
@@ -59,16 +77,64 @@ func Load() *Config {
 		}
 	}
 
+	corsOrigins := CORSAllowedOriginsFromEnv(getEnv("CORS_ALLOWED_ORIGINS", ""), env)
+
+	prMinutes := getEnvInt("PASSWORD_RESET_TOKEN_MINUTES", 60)
+	if prMinutes < 1 {
+		prMinutes = 1
+	}
+	if prMinutes > 10080 {
+		prMinutes = 10080
+	}
+	resetFront := strings.TrimSpace(getEnv("PASSWORD_RESET_FRONTEND_URL", ""))
+	if resetFront == "" && !isProductionLike(env) {
+		resetFront = "http://localhost:5173/reset-password"
+	}
+
 	return &Config{
-		Port:           getEnv("PORT", "8080"),
-		TLSPort:        getEnv("TLS_PORT", "8443"),
-		MongoURI:       getEnv("MONGO_URI", "mongodb://localhost:27017"),
-		MongoDB:        getEnv("MONGO_DB", "userservice"),
-		JWTSecret:      jwtSecret,
-		JWTExpireHours: jwtExpireHours,
-		Env:            env,
-		TLSCert:        getEnv("TLS_CERT", ""),
-		TLSKey:         getEnv("TLS_KEY", ""),
+		Port:                      getEnv("PORT", "8080"),
+		TLSPort:                   getEnv("TLS_PORT", "8443"),
+		MongoURI:                  getEnv("MONGO_URI", "mongodb://localhost:27017"),
+		MongoDB:                   getEnv("MONGO_DB", "userservice"),
+		JWTSecret:                 jwtSecret,
+		JWTExpireHours:            jwtExpireHours,
+		PasswordResetFrontendURL:  resetFront,
+		PasswordResetTokenMinutes: prMinutes,
+		SMTPHost:                  getEnv("SMTP_HOST", ""),
+		SMTPPort:                  getEnv("SMTP_PORT", ""),
+		SMTPUser:                  getEnv("SMTP_USER", ""),
+		SMTPPassword:              getEnv("SMTP_PASSWORD", ""),
+		SMTPFrom:                  getEnv("SMTP_FROM", ""),
+		CORSAllowedOrigins:        corsOrigins,
+		Env:                       env,
+		TLSCert:                   getEnv("TLS_CERT", ""),
+		TLSKey:                    getEnv("TLS_KEY", ""),
+	}
+}
+
+// CORSAllowedOriginsFromEnv parses a comma-separated CORS_ALLOWED_ORIGINS value.
+// When raw is empty and env is not production-like, returns common local Vite preview origins.
+// When raw is empty in production-like env, returns nil (no browser origins; set CORS_ALLOWED_ORIGINS for SPAs).
+func CORSAllowedOriginsFromEnv(raw, env string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw != "" {
+		var out []string
+		for _, p := range strings.Split(raw, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	if isProductionLike(env) {
+		return nil
+	}
+	return []string{
+		"http://localhost:5173",
+		"http://127.0.0.1:5173",
+		"http://localhost:4173",
+		"http://127.0.0.1:4173",
 	}
 }
 
@@ -98,4 +164,16 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func getEnvInt(key string, fallback int) int {
+	s := strings.TrimSpace(os.Getenv(key))
+	if s == "" {
+		return fallback
+	}
+	v, err := strconv.Atoi(s)
+	if err != nil {
+		return fallback
+	}
+	return v
 }

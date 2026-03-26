@@ -1,0 +1,49 @@
+.app {
+  max-width: 32rem;
+  margin: 0 auto;
+  padding: 1.5rem;
+  font-family: system-ui, sans-serif;
+}
+
+.app-header {
+  margin-bottom: 2rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid #ccc;
+}
+
+.app-title {
+  font-size: 1.25rem;
+  margin: 0 0 0.5rem;
+}
+
+.app label {
+  display: block;
+  margin: 0.75rem 0;
+}
+
+.app input {
+  display: block;
+  width: 100%;
+  max-width: 24rem;
+  margin-top: 0.25rem;
+  padding: 0.4rem 0.5rem;
+}
+
+.app button[type='submit'],
+.app button[data-testid='logout'] {
+  margin-top: 1rem;
+  padding: 0.45rem 1rem;
+}
+
+.app dl {
+  margin: 1rem 0;
+}
+
+.app dt {
+  font-weight: 600;
+  margin-top: 0.75rem;
+}
+
+.app dd {
+  margin: 0.25rem 0 0;
+}
